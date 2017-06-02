@@ -39,6 +39,7 @@
 #include "XrdVersion.hh"
 #include "XrdHttpReq.hh"
 #include "XrdHttpTrace.hh"
+#include "XrdHttpExtHandler.hh"
 #include <string.h>
 #include <arpa/inet.h>
 #include <sstream>
@@ -193,6 +194,10 @@ int XrdHttpReq::parseLine(char *line, int len) {
       sendcontinue = true;
     }
 
+    // We memorize the heaers also as a string
+    // because external plugins may need to process it differently
+    allheaders[key] = val;
+    
     line[pos] = ':';
   }
 
@@ -357,7 +362,8 @@ int XrdHttpReq::parseFirstLine(char *line, int len) {
     } else {
       request = rtUnknown;
     }
-
+    
+    requestverb = key;
     line[pos] = ' ';
 
   }
@@ -677,8 +683,24 @@ int XrdHttpReq::ProcessHTTPReq() {
 
   kXR_int32 l;
 
+  
+  
+  // Verify if we have an external handler for this request
+  if (prot->exthandler && prot->exthandler->MatchesPath(this->resource.c_str())) {
+    XrdHttpExtReq xreq(this, prot);
+    int r = prot->exthandler->ProcessReq(xreq);
+    
+    if (!r) return 1; // All went fine, response sent
+    if (r < 0) return -1; // There was a hard error... close the connection
+    
+    return 1; // There was an error and a response was sent
+    
+  }
+  
+  
+  
   //
-  // Prepare the data part
+  // Here we process the request locally
   //
 
   switch (request) {
@@ -760,7 +782,7 @@ int XrdHttpReq::ProcessHTTPReq() {
 
 
           }
-
+      
       switch (reqstate) {
         case 0: // Stat()
           
