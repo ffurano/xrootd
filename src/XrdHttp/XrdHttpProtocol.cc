@@ -39,7 +39,7 @@
 #include <sys/stat.h>
 #include "XrdHttpUtils.hh"
 #include "XrdHttpSecXtractor.hh"
-
+#include "XrdHttpExtHandler.hh"
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -92,6 +92,7 @@ SSL_CTX *XrdHttpProtocol::sslctx = 0;
 BIO *XrdHttpProtocol::sslbio_err = 0;
 XrdCryptoFactory *XrdHttpProtocol::myCryptoFactory = 0;
 XrdHttpSecXtractor *XrdHttpProtocol::secxtractor = 0;
+XrdHttpExtHandler *XrdHttpProtocol::exthandler = 0;
 
 static const unsigned char *s_server_session_id_context = (const unsigned char *) "XrdHTTPSessionCtx";
 static int s_server_session_id_context_len = 18;
@@ -793,6 +794,7 @@ int XrdHttpProtocol::Config(const char *ConfigFN) {
       else if TS_Xeq("secretkey", xsecretkey);
       else if TS_Xeq("desthttps", xdesthttps);
       else if TS_Xeq("secxtractor", xsecxtractor);
+      else if TS_Xeq("exthandler", xexthandler);
       else if TS_Xeq("selfhttps2http", xselfhttps2http);
       else if TS_Xeq("embeddedstatic", xembeddedstatic);
       else if TS_Xeq("listingredir", xlistredir);
@@ -2100,6 +2102,62 @@ int XrdHttpProtocol::xsecxtractor(XrdOucStream & Config) {
   return 0;
 }
 
+
+
+
+
+
+
+
+
+/******************************************************************************/
+/*                            x e x t h a n d l e r                           */
+/******************************************************************************/
+
+/* Function: xexthandler
+ * 
+ *   Purpose:  To parse the directive: exthandler <path> <initparm>
+ * 
+ *             <path>      the path of the plugin to be loaded
+ *             <initparm>  a string parameter (e.g. a config file) that is
+ *                         passed to the initialization of the plugin
+ * 
+ *  Output: 0 upon success or !0 upon failure.
+ */
+
+int XrdHttpProtocol::xexthandler(XrdOucStream & Config) {
+  char *val, valbuf[1024];
+  char *parm;
+  
+  // Get the path
+  //
+  val = Config.GetWord();
+  if (!val || !val[0]) {
+    eDest.Emsg("Config", "No http external handler plugin specified.");
+    return 1;
+  } else {
+    strcpy(valbuf, val);
+    parm = Config.GetWord();
+    
+    // Try to load the plugin (if available) that extracts info from the user cert/proxy
+    //
+    if (LoadExtHandler(&eDest, valbuf, parm))
+      return 1;
+  }
+  
+  
+  return 0;
+}
+
+
+
+
+
+
+
+
+
+
 /******************************************************************************/
 /*                                 x s s l c a d i r                          */
 /******************************************************************************/
@@ -2231,3 +2289,22 @@ int XrdHttpProtocol::LoadSecXtractor(XrdSysError *myeDest, const char *libName,
     myLib.Unload();
     return 1;
 }
+
+
+// Loads the external handler plugin, if available
+int XrdHttpProtocol::LoadExtHandler(XrdSysError *myeDest, const char *libName,
+                                     const char *libParms) {
+  XrdVersionInfo *myVer = &XrdVERSIONINFOVAR(XrdgetProtocol);
+  XrdOucPinLoader myLib(myeDest, myVer, "exthandlerlib", libName);
+  XrdHttpExtHandler *(*ep)(XrdHttpExtHandlerArgs);
+  
+  // Get the entry point of the object creator
+  //
+  ep = (XrdHttpExtHandler *(*)(XrdHttpExtHandlerArgs))(myLib.Resolve("XrdHttpGetExtHandler"));
+  if (ep && (exthandler = ep(myeDest, NULL, libParms))) return 0;
+  myLib.Unload();
+  return 1;
+}
+
+
+

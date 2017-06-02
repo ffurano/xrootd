@@ -46,6 +46,7 @@
 
 #include <vector>
 #include <string>
+#include <map>
 
 //#include <libxml/parser.h>
 //#include <libxml/tree.h>
@@ -157,7 +158,12 @@ public:
 
   /// The request we got
   ReqType request;
-
+  std::string requestverb;
+  
+  // We have to keep the headers for possible further processing
+  // by external plugins
+  std::map<std::string, std::string> allheaders;
+  
   /// The resource specified by the request, complete with all opaque data
   XrdOucString resource;
   /// The opaque data, after parsing
