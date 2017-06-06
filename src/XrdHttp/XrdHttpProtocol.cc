@@ -691,7 +691,8 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 
   // Compute and send the response. This may involve further reading from the socket
   rc = CurrentReq.ProcessHTTPReq();
-  if (rc < 0)
+  //if (rc < 0)
+  if (rc)
     CurrentReq.reset();
 
 
