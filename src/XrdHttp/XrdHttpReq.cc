@@ -611,17 +611,18 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
     s += hash;
 
     s += "&xrdhttptime=";
-    char buf[32];
+    char buf[256];
     sprintf(buf, "%ld", tnow);
     s += buf;
 
     if (secent) {
       if (secent->name) {
         s += "&xrdhttpname=";
-
         char *s1 = quote(secent->name);
-        s += s1;
-        free(s1);
+        if (s1) {
+          s += s1;
+          free(s1);
+        }
       }
 
       if (secent->vorg) {
@@ -629,10 +630,23 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
         s += secent->vorg;
       }
 
-//      if (secent->host) {
-//        s += "&xrdhttphost=";
-//        s += secent->host;
-//      }
+      if (secent->host) {
+        s += "&xrdhttphost=";
+        char *s1 = quote(secent->host);
+        if (s1) {
+          s += s1;
+          free(s1);
+        }
+      }
+      
+      if (secent->moninfo) {
+        s += "&xrdhttpdn=";
+        char *s1 = quote(secent->moninfo);
+        if (s1) {
+          s += s1;
+          free(s1);
+        }
+      }
 
     }
   }
