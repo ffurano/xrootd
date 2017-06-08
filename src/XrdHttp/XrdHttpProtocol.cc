@@ -632,9 +632,18 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
           TRACEI(REQ, " Setting name: " << nfo);
           SecEntity.name = unquote(nfo);
         }
-
-        //nfo = CurrentReq.opaque->Get("xrdhttphost");
-
+        
+        nfo = CurrentReq.opaque->Get("xrdhttphost");
+        if (nfo) {
+          TRACEI(REQ, " Setting host: " << nfo);
+          SecEntity.host = unquote(nfo);
+        }
+        
+        nfo = CurrentReq.opaque->Get("xrdhttpdn");
+        if (nfo) {
+          TRACEI(REQ, " Setting dn: " << nfo);
+          SecEntity.moninfo = unquote(nfo);
+        }
 
         // TODO: compare the xrdhttphost with the real client IP
         // If they are different then reject
