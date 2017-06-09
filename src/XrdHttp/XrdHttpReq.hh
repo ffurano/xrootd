@@ -153,7 +153,8 @@ public:
     rtDELETE,
     rtPROPFIND,
     rtMKCOL,
-    rtMOVE
+    rtMOVE,
+    rtPOST
   };
 
   /// The request we got
