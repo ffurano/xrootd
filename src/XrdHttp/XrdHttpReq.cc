@@ -345,6 +345,8 @@ int XrdHttpReq::parseFirstLine(char *line, int len) {
       request = rtHEAD;
     } else if (!strcmp(key, "PUT")) {
       request = rtPUT;
+    } else if (!strcmp(key, "POST")) {
+      request = rtPOST;
     } else if (!strcmp(key, "PATCH")) {
       request = rtPATCH;
     } else if (!strcmp(key, "OPTIONS")) {
