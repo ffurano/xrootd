@@ -376,5 +376,9 @@ public:
 
 };
 
+
+
+void trim(std::string &str);
+
 #endif	/* XRDHTTPREQ_HH */
 
