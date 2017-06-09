@@ -49,6 +49,8 @@ verb(req->requestverb), headers(req->allheaders) {
   resource = req->resource.c_str();
   
   // These fields usually identify the client that connected
+
+  
   if (prot->SecEntity.name) {
     clientdn = prot->SecEntity.moninfo;
     trim(clientdn);
@@ -61,7 +63,10 @@ verb(req->requestverb), headers(req->allheaders) {
     clientgroups = prot->SecEntity.vorg;
     trim(clientgroups);
   }
+<<<<<<< HEAD
 
+=======
+>>>>>>> Always trim the sec fields passed to external CGI
   
   length = req->length;
 }

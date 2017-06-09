@@ -200,7 +200,6 @@ int XrdHttpReq::parseLine(char *line, int len) {
     trim(ss);
     allheaders[key] = ss;
 
-    
     line[pos] = ':';
   }
 
