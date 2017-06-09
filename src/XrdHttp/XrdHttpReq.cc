@@ -199,7 +199,7 @@ int XrdHttpReq::parseLine(char *line, int len) {
     std::string ss = val;
     trim(ss);
     allheaders[key] = ss;
-    
+     
     line[pos] = ':';
   }
 
