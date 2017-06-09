@@ -50,12 +50,18 @@ verb(req->requestverb), headers(req->allheaders) {
   
   // These fields usually identify the client that connected
   
-  if (prot->SecEntity.name)
+  if (prot->SecEntity.name) {
     clientdn = prot->SecEntity.moninfo;
-  if (prot->SecEntity.host)
+    trim(clientdn);
+  }
+  if (prot->SecEntity.host) {
     clienthost = prot->SecEntity.host;
-  if (prot->SecEntity.vorg)
+    trim(clienthost);
+  }
+  if (prot->SecEntity.vorg) {
     clientgroups = prot->SecEntity.vorg;
+    trim(clientgroups);
+  }
   
   length = req->length;
 }
