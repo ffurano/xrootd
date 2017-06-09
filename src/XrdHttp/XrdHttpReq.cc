@@ -167,7 +167,7 @@ int XrdHttpReq::parseLine(char *line, int len) {
     // by looking at the first token of the line
     // The token is key
     // The value is val
-
+    
     // Screen out the needed header lines
     if (!strcmp(key, "Connection")) {
 
@@ -196,7 +196,9 @@ int XrdHttpReq::parseLine(char *line, int len) {
 
     // We memorize the heaers also as a string
     // because external plugins may need to process it differently
-    allheaders[key] = val;
+    std::string ss = val;
+    trim(ss);
+    allheaders[key] = ss;
     
     line[pos] = ':';
   }
