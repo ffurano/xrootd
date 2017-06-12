@@ -63,10 +63,7 @@ verb(req->requestverb), headers(req->allheaders) {
     clientgroups = prot->SecEntity.vorg;
     trim(clientgroups);
   }
-<<<<<<< HEAD
 
-=======
->>>>>>> Always trim the sec fields passed to external CGI
   
   length = req->length;
 }

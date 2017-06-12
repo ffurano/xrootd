@@ -621,6 +621,7 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
         dest += Port_str;
         dest += CurrentReq.resource.c_str();
         TRACEI(REQ, " rc:" << rc << " self-redirecting to http with security token: '" << dest << "'");
+
         CurrentReq.appendOpaque(dest, &SecEntity, hash, timenow);
         SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0);
         CurrentReq.reset();
@@ -1265,6 +1266,7 @@ int XrdHttpProtocol::Configure(char *parms, XrdProtocol_Config * pi) {
     char buf[16];
     sprintf(buf, "%d", Port);
     Port_str = strdup(buf);
+
   }
 
 
