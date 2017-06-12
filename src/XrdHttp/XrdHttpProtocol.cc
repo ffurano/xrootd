@@ -588,22 +588,31 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
       
       // We have to recompute it here because we don't know to which
       // interface the client had connected to
-      struct sockaddr sa;
+      struct sockaddr_storage sa;
       socklen_t sl = sizeof(sa);
-      getsockname(this->Link->AddrInfo()->SockFD(), &sa, &sl); 
+      getsockname(this->Link->AddrInfo()->SockFD(), (struct sockaddr*)&sa, &sl); 
       
       // now get it back and print it
       char buf[256];
       bool ok = false;
-      if (inet_ntop(AF_INET, (struct sockaddr_in *) &sa, buf, INET_ADDRSTRLEN)) {
-        Addr_str = strdup(buf);
-        ok = true;
-        TRACEI(REQ, " rc:" << rc << " self-redirecting to http (ipv4) with security token: '" << Addr_str << "'");
-      }
-      else if (inet_ntop(AF_INET6, (struct sockaddr_in *) &sa, buf, INET6_ADDRSTRLEN)){
-        Addr_str = strdup(buf);
-        ok = true;
-        TRACEI(REQ, " rc:" << rc << " self-redirecting to http (ipv6) with security token: '" << Addr_str << "'");
+      
+      switch (sa.ss_family) {
+        case AF_INET:
+          if (inet_ntop(AF_INET, &(((sockaddr_in*)&sa)->sin_addr), buf, INET_ADDRSTRLEN)) {
+            if (Addr_str) free(Addr_str);
+            Addr_str = strdup(buf);
+            ok = true;
+          }
+          break;
+        case AF_INET6:
+          if (inet_ntop(AF_INET6, &(((sockaddr_in6*)&sa)->sin6_addr), buf, INET6_ADDRSTRLEN)) {
+            if (Addr_str) free(Addr_str);
+            Addr_str = strdup(buf);
+            ok = true;
+          }
+          break;
+        default:
+          TRACEI(REQ, " Can't recognize the address family of the local host.");
       }
       
       if (ok) {
@@ -611,6 +620,7 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
         dest += ":";
         dest += Port_str;
         dest += CurrentReq.resource.c_str();
+        TRACEI(REQ, " rc:" << rc << " self-redirecting to http with security token: '" << dest << "'");
         CurrentReq.appendOpaque(dest, &SecEntity, hash, timenow);
         SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0);
         CurrentReq.reset();
@@ -1513,7 +1523,8 @@ void XrdHttpProtocol::Cleanup() {
 
   memset(&SecEntity, 0, sizeof (SecEntity));
 
-
+  if (Addr_str) free(Addr_str);
+  Addr_str = 0;
 }
 
 void XrdHttpProtocol::Reset() {
