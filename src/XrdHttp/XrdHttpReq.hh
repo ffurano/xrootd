@@ -348,7 +348,7 @@ public:
 
   virtual int File(XrdXrootd::Bridge::Context &info, //!< the result context
           int dlen //!< byte  count
-          );
+  );
 
   //-----------------------------------------------------------------------------
   //! Redirect the client to another host:port.
