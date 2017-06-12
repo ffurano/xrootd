@@ -266,7 +266,10 @@ protected:
 
   /// The link we are bound to
   XrdLink *Link;
-
+  
+  /// Our IP address, as a string. Please remember that this may not be unique for
+  /// a given machine, hence we need to keep it here and recompute ad every new connection.
+  char *Addr_str;
 
   
   /// The instance of the DN mapper. Created only when a valid path is given
@@ -296,9 +299,6 @@ protected:
   
   /// Our port, as a string
   static char * Port_str;
-  
-  /// Our IP address, as a string
-  static char * Addr_str;
 
   /// Windowsize
   static int Window;
