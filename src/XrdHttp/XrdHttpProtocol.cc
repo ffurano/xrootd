@@ -585,16 +585,40 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 
       XrdOucString dest = "Location: http://";
       // Here I should put the IP addr of the server
-      Link->Host();
-
-      dest += Addr_str;
-      dest += ":";
-      dest += Port_str;
-      dest += CurrentReq.resource.c_str();
-      CurrentReq.appendOpaque(dest, &SecEntity, hash, timenow);
-      SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0);
-      CurrentReq.reset();
-      return 1;
+      
+      // We have to recompute it here because we don't know to which
+      // interface the client had connected to
+      struct sockaddr sa;
+      socklen_t sl = sizeof(sa);
+      getsockname(this->Link->AddrInfo()->SockFD(), &sa, &sl); 
+      
+      // now get it back and print it
+      char buf[256];
+      bool ok = false;
+      if (inet_ntop(AF_INET, (struct sockaddr_in *) &sa, buf, INET_ADDRSTRLEN)) {
+        Addr_str = strdup(buf);
+        ok = true;
+        TRACEI(REQ, " rc:" << rc << " self-redirecting to http (ipv4) with security token: '" << Addr_str << "'");
+      }
+      else if (inet_ntop(AF_INET6, (struct sockaddr_in *) &sa, buf, INET6_ADDRSTRLEN)){
+        Addr_str = strdup(buf);
+        ok = true;
+        TRACEI(REQ, " rc:" << rc << " self-redirecting to http (ipv6) with security token: '" << Addr_str << "'");
+      }
+      
+      if (ok) {
+        dest += Addr_str;
+        dest += ":";
+        dest += Port_str;
+        dest += CurrentReq.resource.c_str();
+        CurrentReq.appendOpaque(dest, &SecEntity, hash, timenow);
+        SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0);
+        CurrentReq.reset();
+        return 1;
+      }
+      
+      TRACEI(REQ, " rc:" << rc << " Can't perform self-redirection.");
+      
     }
   }
 
@@ -1231,7 +1255,6 @@ int XrdHttpProtocol::Configure(char *parms, XrdProtocol_Config * pi) {
     char buf[16];
     sprintf(buf, "%d", Port);
     Port_str = strdup(buf);
-
 
     // now get it back and print it
     inet_ntop(AF_INET, &((struct sockaddr_in *) pi->myAddr)->sin_addr, buf, INET_ADDRSTRLEN);
