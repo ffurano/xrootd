@@ -65,7 +65,6 @@ int XrdHttpProtocol::hailWait = 0;
 int XrdHttpProtocol::readWait = 0;
 int XrdHttpProtocol::Port = 1094;
 char *XrdHttpProtocol::Port_str = 0;
-char *XrdHttpProtocol::Addr_str = 0;
 int XrdHttpProtocol::Window = 0;
 
 //XrdXrootdStats *XrdHttpProtocol::SI = 0;
@@ -180,6 +179,7 @@ XrdHttpProtocol::XrdHttpProtocol(bool imhttps)
 : XrdProtocol("HTTP protocol handler"), ProtLink(this),
 SecEntity(""), CurrentReq(this) {
   myBuff = 0;
+  Addr_str = 0;
   Reset();
   ishttps = imhttps;
 
@@ -1265,10 +1265,6 @@ int XrdHttpProtocol::Configure(char *parms, XrdProtocol_Config * pi) {
     char buf[16];
     sprintf(buf, "%d", Port);
     Port_str = strdup(buf);
-
-    // now get it back and print it
-    inet_ntop(AF_INET, &((struct sockaddr_in *) pi->myAddr)->sin_addr, buf, INET_ADDRSTRLEN);
-    Addr_str = strdup(buf);
   }
 
 
