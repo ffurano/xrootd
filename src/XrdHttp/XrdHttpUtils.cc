@@ -54,7 +54,6 @@
 #include "XrdSec/XrdSecEntity.hh"
 # include "sys/param.h"
 #include "XrdOuc/XrdOucString.hh"
-static pthread_key_t cm_key;
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 static HMAC_CTX* HMAC_CTX_new() {
@@ -210,9 +209,6 @@ void calcHashes(
   char buf[64];
   struct tm tms;
 
-  // set so key destructor can trigger removal of
-  // libcrypto error state when the thread finishes
-  pthread_setspecific(cm_key, &cm_key);
 
   if (!hash) {
     return;

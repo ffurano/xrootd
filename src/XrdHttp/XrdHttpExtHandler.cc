@@ -50,7 +50,7 @@ verb(req->requestverb), headers(req->allheaders) {
   
   // These fields usually identify the client that connected
   
-  if (prot->SecEntity.name) {
+  if (prot->SecEntity.moninfo) {
     clientdn = prot->SecEntity.moninfo;
     trim(clientdn);
   }
