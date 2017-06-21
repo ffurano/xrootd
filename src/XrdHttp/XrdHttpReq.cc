@@ -666,6 +666,9 @@ void XrdHttpReq::parseResource(char *res) {
   // Not found, then it's just a filename
   if (!p) {
     resource.assign(res, 0);
+    char *buf = unquote((char *)resource.c_str());
+    resource.assign(buf, 0);
+    free(buf);
     
     // Sanitize the resource string, removing double slashes
     int pos = 0;
@@ -683,6 +686,10 @@ void XrdHttpReq::parseResource(char *res) {
   int cnt = p - res; // Number of chars to copy
   resource.assign(res, 0, cnt - 1);
 
+  char *buf = unquote((char *)resource.c_str());
+  resource.assign(buf, 0);
+  free(buf);
+  
   // Whatever comes after is opaque data to be parsed
   if (strlen(p) > 1)
     opaque = new XrdOucEnv(p + 1);
