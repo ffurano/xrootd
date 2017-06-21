@@ -2121,7 +2121,8 @@ void XrdHttpReq::reset() {
   ralist = 0;
 
   request = rtUnknown;
-  resource[0] = 0;
+  resource = "";
+  allheaders.clear();
 
   headerok = false;
   keepalive = true;
