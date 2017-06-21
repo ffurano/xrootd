@@ -607,7 +607,10 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
         case AF_INET6:
           if (inet_ntop(AF_INET6, &(((sockaddr_in6*)&sa)->sin6_addr), buf, INET6_ADDRSTRLEN)) {
             if (Addr_str) free(Addr_str);
-            Addr_str = strdup(buf);
+            Addr_str = malloc(strlen(buf)+3);
+            strcpy(Addr_str, "[");
+            strcat(Addr_str, buf);
+            strcat(Addr_str, "]");
             ok = true;
           }
           break;
