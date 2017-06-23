@@ -305,7 +305,8 @@ int XrdHttpProtocol::GetVOMSData(XrdLink *lp) {
     // Add the original DN to the moninfo. Not sure if it makes sense to parametrize this or not.
     if (SecEntity.moninfo) free(SecEntity.moninfo);
     SecEntity.moninfo = X509_NAME_oneline(X509_get_subject_name(peer_cert), NULL, 0);
-
+    TRACEI(DEBUG, " Subject name is : '" << SecEntity.moninfo << "'");
+    
     // Here we have the user DN, and try to extract an useful user name from it
     if (SecEntity.name) free(SecEntity.name);
     SecEntity.name = 0;

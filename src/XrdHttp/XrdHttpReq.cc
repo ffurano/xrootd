@@ -1504,15 +1504,15 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
             stringresp += prot->SecEntity.vorg;
           }
           
-          if (prot->SecEntity.name) {
+          if (prot->SecEntity.moninfo) {
             stringresp += " DN: ";
-            stringresp += prot->SecEntity.name;
-          }
-          else
-            if (prot->SecEntity.moninfo) {
+            stringresp += prot->SecEntity.moninfo;
+          } else
+            if (prot->SecEntity.name) {
               stringresp += " DN: ";
-              stringresp += prot->SecEntity.moninfo;
-            }  
+              stringresp += prot->SecEntity.name;
+            }
+          
           
           if (prot->SecEntity.role) {
             stringresp += " Role: ";
