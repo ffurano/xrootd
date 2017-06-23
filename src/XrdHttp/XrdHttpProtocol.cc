@@ -664,26 +664,30 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 
         nfo = CurrentReq.opaque->Get("xrdhttpvorg");
         if (nfo) {
-          TRACEI(REQ, " Setting vorg: " << nfo);
+          TRACEI(DEBUG, " Setting vorg: " << nfo);
           SecEntity.vorg = strdup(nfo);
+          TRACEI(REQ, " Setting vorg: " << SecEntity.vorg);
         }
 
         nfo = CurrentReq.opaque->Get("xrdhttpname");
         if (nfo) {
-          TRACEI(REQ, " Setting name: " << nfo);
+          TRACEI(DEBUG, " Setting name: " << nfo);
           SecEntity.name = unquote(nfo);
+          TRACEI(REQ, " Setting name: " << SecEntity.name);
         }
         
         nfo = CurrentReq.opaque->Get("xrdhttphost");
         if (nfo) {
-          TRACEI(REQ, " Setting host: " << nfo);
+          TRACEI(DEBUG, " Setting host: " << nfo);
           SecEntity.host = unquote(nfo);
+          TRACEI(REQ, " Setting host: " << SecEntity.host);
         }
         
         nfo = CurrentReq.opaque->Get("xrdhttpdn");
         if (nfo) {
-          TRACEI(REQ, " Setting dn: " << nfo);
+          TRACEI(DEBUG, " Setting dn: " << nfo);
           SecEntity.moninfo = unquote(nfo);
+          TRACEI(REQ, " Setting dn: " << SecEntity.moninfo);
         }
 
         // TODO: compare the xrdhttphost with the real client IP
@@ -745,7 +749,8 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 
   // Compute and send the response. This may involve further reading from the socket
   rc = CurrentReq.ProcessHTTPReq();
-  CurrentReq.reset();
+  if (rc < 0)
+     CurrentReq.reset();
 
 
 
@@ -2327,6 +2332,11 @@ int XrdHttpProtocol::doStat(char *fname) {
 // Loads the SecXtractor plugin, if available
 int XrdHttpProtocol::LoadSecXtractor(XrdSysError *myeDest, const char *libName,
                                      const char *libParms) {
+  
+  
+  // We don't want to load it more than once
+  if (secxtractor) return 1;
+  
     XrdVersionInfo *myVer = &XrdVERSIONINFOVAR(XrdgetProtocol);
     XrdOucPinLoader myLib(myeDest, myVer, "secxtractorlib", libName);
     XrdHttpSecXtractor *(*ep)(XrdHttpSecXtractorArgs);
@@ -2343,6 +2353,10 @@ int XrdHttpProtocol::LoadSecXtractor(XrdSysError *myeDest, const char *libName,
 // Loads the external handler plugin, if available
 int XrdHttpProtocol::LoadExtHandler(XrdSysError *myeDest, const char *libName,
                                      const char *libParms) {
+  
+  // We don't want to load it more than once
+  if (exthandler) return 1;
+  
   XrdVersionInfo *myVer = &XrdVERSIONINFOVAR(XrdgetProtocol);
   XrdOucPinLoader myLib(myeDest, myVer, "exthandlerlib", libName);
   XrdHttpExtHandler *(*ep)(XrdHttpExtHandlerArgs);
