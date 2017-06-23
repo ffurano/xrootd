@@ -1320,9 +1320,13 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
   switch (request) {
     case XrdHttpReq::rtUnknown:
+    {
+      prot->SendSimpleResp(400, NULL, NULL, (char *) "Request malformed 1", 0);
+      return -1;
+    }
     case XrdHttpReq::rtMalformed:
     {
-      prot->SendSimpleResp(400, NULL, NULL, (char *) "Request malformed", 0);
+      prot->SendSimpleResp(400, NULL, NULL, (char *) "Request malformed 2", 0);
       return -1;
     }
     case XrdHttpReq::rtHEAD:
