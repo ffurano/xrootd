@@ -37,7 +37,7 @@
 Name:      xrootd
 Epoch:     1
 
-Version:   9.0.5
+Version:   9.0.6
 
 Release:   __RELEASE__%{?dist}%{?_with_cpp11:.cpp11}%{?_with_clang:.clang}
 Summary:   Extended ROOT file server
