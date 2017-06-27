@@ -632,7 +632,7 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
         CurrentReq.appendOpaque(dest, &SecEntity, hash, timenow);
         SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0);
         CurrentReq.reset();
-        return 1;
+        return -1;
       }
       
       TRACEI(REQ, " rc:" << rc << " Can't perform self-redirection.");
