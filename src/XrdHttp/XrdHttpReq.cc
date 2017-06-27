@@ -714,7 +714,7 @@ int XrdHttpReq::ProcessHTTPReq() {
   if (prot->exthandler && prot->exthandler->MatchesPath(this->resource.c_str())) {
     XrdHttpExtReq xreq(this, prot);
     int r = prot->exthandler->ProcessReq(xreq);
-    reset();
+    this->reset();
 
     
     if (!r) return 1; // All went fine, response sent

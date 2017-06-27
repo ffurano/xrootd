@@ -562,7 +562,10 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
   }
 
   // If we are in self-redirect mode, then let's do it
-  if (ishttps && ssldone && selfhttps2http) {
+  // Do selfredirect only with 'simple' requests, otherwise poor clients may misbehave
+  if (ishttps && ssldone && selfhttps2http &&
+    ( (CurrentReq.request == rtGET) || (CurrentReq.request == rtPUT) ||
+      (CurrentReq.request == rtPROPFIND)) ) {
     char hash[512];
     time_t timenow = time(0);
 
