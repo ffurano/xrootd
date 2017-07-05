@@ -1188,7 +1188,7 @@ int XrdHttpProtocol::SendData(char *body, int bodylen) {
 /// Returns 0 if OK
 
 int XrdHttpProtocol::SendSimpleResp(int code, char *desc, char *header_to_add, char *body, long long bodylen) {
-  char outhdr[512];
+  char outhdr[1024];
   char b[32];
   long long l;
   const char *crlf = "\r\n";
@@ -1232,12 +1232,16 @@ int XrdHttpProtocol::SendSimpleResp(int code, char *desc, char *header_to_add, c
   }
   strncat(outhdr, crlf, 2);
 
+  unsigned int hdrlen = strlen(outhdr);
+  if (hdrlen >= sizeof(outhdr))
+    TRACEI(ALL, "WARNING: header size too large!");
+  
   //
   // Send the header
   //
   TRACEI(RSP, "Sending resp: " << code << " len:" << l);
 
-  if (SendData(outhdr, strlen(outhdr)))
+  if (SendData(outhdr, hdrlen))
     return -1;
 
   //
@@ -1385,7 +1389,13 @@ extern "C" int verify_callback(int ok, X509_STORE_CTX * store) {
 /// Initialization of the ssl security
 
 int XrdHttpProtocol::InitSecurity() {
-
+  
+  SSL_library_init();
+  SSL_load_error_strings();
+  OpenSSL_add_all_ciphers();
+  OpenSSL_add_all_algorithms();
+  OpenSSL_add_all_digests();
+  
 #ifdef HAVE_XRDCRYPTO
 #ifndef WIN32
   // Borrow the initialization of XrdCryptossl, in order to share the
@@ -1398,11 +1408,6 @@ int XrdHttpProtocol::InitSecurity() {
 #endif
 #endif
 
-  SSL_library_init();
-  SSL_load_error_strings();
-  OpenSSL_add_all_ciphers();
-  OpenSSL_add_all_algorithms();
-  OpenSSL_add_all_digests();
 
   const SSL_METHOD *meth;
 
