@@ -550,13 +550,31 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   char buf[512];
   char hash[512];
   hash[0] = '\0';
-
+  
   if (prot->isdesthttps)
     redirdest = "Location: https://";
   else
     redirdest = "Location: http://";
-
-  redirdest += hname;
+  
+  // Beware, certain Ofs implementations (e.g. EOS) add opaque data directly to the host name
+  // This must be correctly treated here and appended to the opaque info
+  // that we may already have
+  char *pp = strchr((char *)hname, '?');
+  char *vardata = 0;
+  if (pp) {
+    *pp = '\0';
+    redirdest += hname;
+    vardata = pp+1;
+    int varlen = strlen(vardata);
+    
+    //Now extract the remaining, vardata points to it
+    while(*vardata == '&' && varlen) {vardata++; varlen--;}
+    
+    // Put the question mark back where it was
+    *pp = '?';
+  }
+  else
+    redirdest += hname;
 
   if (port) {
     sprintf(buf, ":%d", port);
@@ -564,8 +582,18 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   }
 
   redirdest += resource.c_str();
+  
+  // Here we put back the opaque info, if any
+  if (vardata) {
+    redirdest += "?&";
+    redirdest += vardata;
+  }
+  
+  // Shall we put also the opaque data of the request? Maybe not
+  //int l;
+  //if (opaque && opaque->Env(l))
+  //  redirdest += opaque->Env(l);
 
-  TRACE(REQ, " XrdHttpReq::Redir Redirecting to " << redirdest);
 
   time_t timenow = 0;
   if (!prot->isdesthttps && prot->ishttps) {
@@ -583,7 +611,8 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   } else
     appendOpaque(redirdest, 0, 0, 0);
 
-
+  
+  TRACE(REQ, " XrdHttpReq::Redir Redirecting to " << redirdest);
 
   prot->SendSimpleResp(302, NULL, (char *) redirdest.c_str(), 0, 0);
 
@@ -668,6 +697,7 @@ void XrdHttpReq::parseResource(char *res) {
     resource.assign(res, 0);
     char *buf = unquote((char *)resource.c_str());
     resource.assign(buf, 0);
+    resourceplusopaque.assign(buf, 0);
     free(buf);
     
     // Sanitize the resource string, removing double slashes
@@ -689,11 +719,7 @@ void XrdHttpReq::parseResource(char *res) {
   char *buf = unquote((char *)resource.c_str());
   resource.assign(buf, 0);
   free(buf);
-  
-  // Whatever comes after is opaque data to be parsed
-  if (strlen(p) > 1)
-    opaque = new XrdOucEnv(p + 1);
-    
+      
   // Sanitize the resource string, removing double slashes
   int pos = 0;
   do { 
@@ -701,6 +727,17 @@ void XrdHttpReq::parseResource(char *res) {
     if (pos != STR_NPOS)
       resource.erase(pos, 1);
   } while (pos != STR_NPOS);
+  
+  resourceplusopaque = resource;
+  // Whatever comes after is opaque data to be parsed
+  if (strlen(p) > 1) {
+    buf = unquote(p + 1);
+    opaque = new XrdOucEnv(buf);
+    resourceplusopaque.append(buf);
+    free(buf);
+  }
+  
+  
   
 }
 
@@ -742,7 +779,7 @@ int XrdHttpReq::ProcessHTTPReq() {
     {
 
       // Do a Stat
-      if (prot->doStat((char *) resource.c_str())) {
+      if (prot->doStat((char *) resourceplusopaque.c_str())) {
         prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
         return -1;
       }
@@ -815,7 +852,7 @@ int XrdHttpReq::ProcessHTTPReq() {
           
 
           // Do a Stat
-          if (prot->doStat((char *) resource.c_str())) {
+          if (prot->doStat((char *) resourceplusopaque.c_str())) {
             XrdOucString errmsg = "Error stating";
             errmsg += resource.c_str();
             prot->SendSimpleResp(404, NULL, NULL, (char *) errmsg.c_str(), 0);
@@ -849,7 +886,7 @@ int XrdHttpReq::ProcessHTTPReq() {
 
 
             string res;
-            res = resource.c_str();
+            res = resourceplusopaque.c_str();
             //res += "?xrd.dirstat=1";
 
             // --------- DIRLIST
@@ -873,12 +910,12 @@ int XrdHttpReq::ProcessHTTPReq() {
             // --------- OPEN
             memset(&xrdreq, 0, sizeof (ClientRequest));
             xrdreq.open.requestid = htons(kXR_open);
-            l = resource.length() + 1;
+            l = resourceplusopaque.length() + 1;
             xrdreq.open.dlen = htonl(l);
             xrdreq.open.mode = 0;
             xrdreq.open.options = htons(kXR_retstat | kXR_open_read);
 
-            if (!prot->Bridge->Run((char *) &xrdreq, (char *) resource.c_str(), l)) {
+            if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
               prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
               return -1;
             }
@@ -992,12 +1029,12 @@ int XrdHttpReq::ProcessHTTPReq() {
         // --------- OPEN for write!
         memset(&xrdreq, 0, sizeof (ClientRequest));
         xrdreq.open.requestid = htons(kXR_open);
-        l = resource.length() + 1;
+        l = resourceplusopaque.length() + 1;
         xrdreq.open.dlen = htonl(l);
         xrdreq.open.mode = htons(kXR_ur | kXR_uw | kXR_gw | kXR_gr | kXR_or);
         xrdreq.open.options = htons(kXR_mkpath | kXR_open_updt | kXR_new);
 
-        if (!prot->Bridge->Run((char *) &xrdreq, (char *) resource.c_str(), l)) {
+        if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
           prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
           return -1;
         }
@@ -1083,13 +1120,13 @@ int XrdHttpReq::ProcessHTTPReq() {
           // --------- STAT is always the first step
           memset(&xrdreq, 0, sizeof (ClientRequest));
           xrdreq.stat.requestid = htons(kXR_stat);
-          string s = resource.c_str();
+          string s = resourceplusopaque.c_str();
 
 
-          l = resource.length() + 1;
+          l = resourceplusopaque.length() + 1;
           xrdreq.stat.dlen = htonl(l);
 
-          if (!prot->Bridge->Run((char *) &xrdreq, (char *) resource.c_str(), l)) {
+          if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
             prot->SendSimpleResp(501, NULL, NULL, (char *) "Could not run request.", 0);
             return -1;
           }
@@ -1104,7 +1141,7 @@ int XrdHttpReq::ProcessHTTPReq() {
             memset(&xrdreq, 0, sizeof (ClientRequest));
             xrdreq.rmdir.requestid = htons(kXR_rmdir);
 
-            string s = resource.c_str();
+            string s = resourceplusopaque.c_str();
 
             l = s.length() + 1;
             xrdreq.rmdir.dlen = htonl(l);
@@ -1118,7 +1155,7 @@ int XrdHttpReq::ProcessHTTPReq() {
             memset(&xrdreq, 0, sizeof (ClientRequest));
             xrdreq.rm.requestid = htons(kXR_rm);
 
-            string s = resource.c_str();
+            string s = resourceplusopaque.c_str();
 
             l = s.length() + 1;
             xrdreq.rm.dlen = htonl(l);
@@ -1177,13 +1214,13 @@ int XrdHttpReq::ProcessHTTPReq() {
           // --------- STAT is always the first step
           memset(&xrdreq, 0, sizeof (ClientRequest));
           xrdreq.stat.requestid = htons(kXR_stat);
-          string s = resource.c_str();
+          string s = resourceplusopaque.c_str();
 
 
-          l = resource.length() + 1;
+          l = resourceplusopaque.length() + 1;
           xrdreq.stat.dlen = htonl(l);
 
-          if (!prot->Bridge->Run((char *) &xrdreq, (char *) resource.c_str(), l)) {
+          if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
             prot->SendSimpleResp(501, NULL, NULL, (char *) "Could not run request.", 0);
             return -1;
           }
@@ -1208,7 +1245,7 @@ int XrdHttpReq::ProcessHTTPReq() {
           memset(&xrdreq, 0, sizeof (ClientRequest));
           xrdreq.dirlist.requestid = htons(kXR_dirlist);
 
-          string s = resource.c_str();
+          string s = resourceplusopaque.c_str();
           xrdreq.dirlist.options[0] = kXR_dstat;
           //s += "?xrd.dirstat=1";
 
@@ -1235,7 +1272,7 @@ int XrdHttpReq::ProcessHTTPReq() {
       memset(&xrdreq, 0, sizeof (ClientRequest));
       xrdreq.mkdir.requestid = htons(kXR_mkdir);
 
-      string s = resource.c_str();
+      string s = resourceplusopaque.c_str();
       xrdreq.mkdir.options[0] = (kXR_char) kXR_mkpath;
 
       l = s.length() + 1;
@@ -1256,7 +1293,7 @@ int XrdHttpReq::ProcessHTTPReq() {
       memset(&xrdreq, 0, sizeof (ClientRequest));
       xrdreq.mv.requestid = htons(kXR_mv);
 
-      string s = resource.c_str();
+      string s = resourceplusopaque.c_str();
       s += " ";
 
       char buf[256];

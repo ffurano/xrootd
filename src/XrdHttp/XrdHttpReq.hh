@@ -165,10 +165,13 @@ public:
   // by external plugins
   std::map<std::string, std::string> allheaders;
   
-  /// The resource specified by the request, complete with all opaque data
+  /// The resource specified by the request, stripped of opaque data
   XrdOucString resource;
   /// The opaque data, after parsing
   XrdOucEnv *opaque;
+  /// The resource specified by the request, including all the opaque data
+  XrdOucString resourceplusopaque;
+  
   
   /// Tells if we have finished reading the header
   bool headerok;
