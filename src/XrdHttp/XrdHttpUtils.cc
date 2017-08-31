@@ -298,7 +298,11 @@ char *unquote(char *str) {
 
   for (i = 0; i < l; i++) {
 
-    if (str[i] == '%') {
+    if (!strncmp(str+i, "&quot;", 6)) {
+      r[j] = '"';
+      i += 5;
+    }
+    else if (str[i] == '%') {
       char savec = str[i + 3];
       str[i + 3] = '\0';
 
@@ -308,6 +312,8 @@ char *unquote(char *str) {
       i += 2;
     } else r[j] = str[i];
 
+
+    
     j++;
   }
 
@@ -341,13 +347,19 @@ char *quote(char *str) {
         strcpy(r + j, "%5D");
         j += 3;
         break;
-      case ':':
-        strcpy(r + j, "%3A");
-        j += 3;
-        break;
+//       case ':':
+//         strcpy(r + j, "%3A");
+//         j += 3;
+//         break;
       case '/':
         strcpy(r + j, "%2F");
         j += 3;
+        break;
+      case '"':
+        strcpy(r + j, "&quot;");
+        j += 6;
+//         strcpy(r + j, "%22");
+//         j += 3;
         break;
       default:
         r[j++] = c;

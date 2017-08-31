@@ -171,6 +171,8 @@ public:
   XrdOucEnv *opaque;
   /// The resource specified by the request, including all the opaque data
   XrdOucString resourceplusopaque;
+  // In the case that the owncloud mapping has been applied, we store here the original resource
+  XrdOucString origresource;
   
   
   /// Tells if we have finished reading the header
@@ -193,7 +195,6 @@ public:
   std::string host;
   /// The destination field specified in the req
   std::string destination;
-
 
   //
   // Area for coordinating request and responses to/from the bridge
@@ -224,7 +225,14 @@ public:
   long filemodtime;
   char fhandle[4];
   bool fopened;
-
+  bool mappingdone;
+  bool gotphyschksum;
+  unsigned long fileid;
+  XrdOucString filechksum;
+  
+  /// The checksums did not match
+  bool checksummismatch;
+  
   /// If we want to give a string as a response, we compose it here
   std::string stringresp;
 
@@ -235,8 +243,10 @@ public:
   long long writtenbytes;
 
 
-
-
+  /// OwnCloud and CernBox need this
+  int OCnChunk, OCtotChunks;
+  long long OCuploadoffset, OCtotallength;
+  XrdOucString eosfileid;
 
   /// Crunch an http request.
   /// Return values:

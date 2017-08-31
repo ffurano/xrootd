@@ -754,6 +754,8 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 
   // Compute and send the response. This may involve further reading from the socket
   rc = CurrentReq.ProcessHTTPReq();
+  
+  
   if (rc < 0)
      CurrentReq.reset();
 
@@ -1190,7 +1192,7 @@ int XrdHttpProtocol::SendData(char *body, int bodylen) {
 /// Returns 0 if OK
 
 int XrdHttpProtocol::SendSimpleResp(int code, char *desc, char *header_to_add, char *body, long long bodylen) {
-  char outhdr[1024];
+  char outhdr[10240];
   char b[32];
   long long l;
   const char *crlf = "\r\n";
@@ -1207,10 +1209,12 @@ int XrdHttpProtocol::SendSimpleResp(int code, char *desc, char *header_to_add, c
   if (desc) strcat(outhdr, desc);
   else {
     if (code == 200) strcat(outhdr, "OK");
+    else if (code == 201) strcat(outhdr, "OK");
+    else if (code == 204) strcat(outhdr, "OK");
     else if (code == 206) strcat(outhdr, "Partial content");
     else if (code == 302) strcat(outhdr, "Redirect");
     else if (code == 404) strcat(outhdr, "Not found");
-    else strcat(outhdr, "Unknown");
+    else strcat(outhdr, "Nothing to say");
   }
   strncat(outhdr, crlf, 2);
 
@@ -1241,7 +1245,7 @@ int XrdHttpProtocol::SendSimpleResp(int code, char *desc, char *header_to_add, c
   //
   // Send the header
   //
-  TRACEI(RSP, "Sending resp: " << code << " len:" << l);
+  TRACEI(RSP, "Sending resp: " << code << " len:" << l << " header: '" << outhdr << "'");
 
   if (SendData(outhdr, hdrlen))
     return -1;
@@ -2323,13 +2327,26 @@ int XrdHttpProtocol::doStat(char *fname) {
   CurrentReq.filemodtime = 0;
 
   memset(&CurrentReq.xrdreq, 0, sizeof (ClientRequest));
-  CurrentReq.xrdreq.stat.requestid = htons(kXR_stat);
-  memset(CurrentReq.xrdreq.stat.reserved, 0,
-          sizeof (CurrentReq.xrdreq.stat.reserved));
-  l = strlen(fname) + 1;
-  CurrentReq.xrdreq.stat.dlen = htonl(l);
+//   CurrentReq.xrdreq.stat.requestid = htons(kXR_stat);
+//   memset(CurrentReq.xrdreq.stat.reserved, 0,
+//           sizeof (CurrentReq.xrdreq.stat.reserved));
+//   l = strlen(fname) + 1;
+//   CurrentReq.xrdreq.stat.dlen = htonl(l);
+//   memcpy(xrdreq.query.fhandle, fhandle, 4);
+  
+  CurrentReq.xrdreq.query.requestid = htons(kXR_query);
+  CurrentReq.xrdreq.query.infotype = htons(kXR_Qopaquf);
+  XrdOucString s = fname;
+  // Trim out the opaque info
+  int p;
+  if ((p = s.find('?')) != STR_NPOS)
+    s.erase(p);
+  
+  s.append("?mgm.pcmd=getetagstat");
+  l = s.length() + 1;
+  CurrentReq.xrdreq.query.dlen = htonl(l);
 
-  b = Bridge->Run((char *) &CurrentReq.xrdreq, fname, l);
+  b = Bridge->Run((char *) &CurrentReq.xrdreq, (char*)s.c_str(), l);
   if (!b) {
     return -1;
   }

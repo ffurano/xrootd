@@ -66,8 +66,11 @@
 #define TRACELINK prot->Link
 
 
-
-
+//-------------- EOS stuff
+static unsigned long long FidToInode(unsigned long long fid)
+{
+  return (fid << 28);
+}
 
 
 
@@ -489,10 +492,16 @@ bool XrdHttpReq::Data(XrdXrootd::Bridge::Context &info, //!< the result context
   this->iovL = iovL_;
   this->final = final_;
 
-  if (PostProcessHTTPReq(final_)) reset();
+  int r = PostProcessHTTPReq(final_);
+  
+  
+  if (r) reset();
+  
+  
 
-
-  return true;
+  if (r >= 0)
+    return true;
+  return false;
 
 };
 
@@ -516,10 +525,15 @@ bool XrdHttpReq::Done(XrdXrootd::Bridge::Context & info) {
 
   xrdresp = kXR_ok;
   //this->iovN = 0;
+ 
+  int r = PostProcessHTTPReq(true);
+  if (r) reset();
+  
+  
+  if (r >= 0)
+    return true;
+  return false;
 
-  if (PostProcessHTTPReq(true)) reset();
-
-  return true;
 };
 
 bool XrdHttpReq::Error(XrdXrootd::Bridge::Context &info, //!< the result context
@@ -537,7 +551,8 @@ bool XrdHttpReq::Error(XrdXrootd::Bridge::Context &info, //!< the result context
   if (PostProcessHTTPReq()) reset();
 
   // Second part of the ugly hack on stat()
-  if ((request == rtGET) && (xrdreq.header.requestid == ntohs(kXR_stat)))
+  if ( ((request == rtGET) && (xrdreq.header.requestid == ntohs(kXR_stat))) ||
+    (xrdreq.header.requestid == ntohs(kXR_query)) )
     return true;
   
   return false;
@@ -586,11 +601,20 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
 
   redirdest += resource.c_str();
   
+  TRACE(REQ, " XrdHttpReq::Redir Composing redirdest: '" << redirdest << "'");
+  
   // Here we put back the opaque info, if any
   if (vardata) {
-    redirdest += "?&";
-    redirdest += vardata;
+    // Beware, EOS can produce opaque strings that are not HTTP compliant
+    char *s1 = quote(vardata);
+    if (s1) {
+      redirdest += "?&";
+      redirdest += s1;
+      free(s1);
+    }
   }
+  
+  TRACE(REQ, " XrdHttpReq::Redir Composing redirdest: '" << redirdest << "'");
   
   // Shall we put also the opaque data of the request? Maybe not
   //int l;
@@ -617,6 +641,20 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   
   TRACE(REQ, " XrdHttpReq::Redir Redirecting to " << redirdest);
 
+  // This is the ngnx/Cernbox hack
+  XrdOucString finaldest(redirdest.c_str()+10);
+  redirdest.append("\r\nX-Accel-Redirect: /internal_redirect/");
+  if (prot->isdesthttps)
+    redirdest.append(finaldest.c_str()+8);
+  else
+    redirdest.append(finaldest.c_str()+7);
+  
+  redirdest.append("\r\nX-Sendfile: /internal_redirect/");
+  if (prot->isdesthttps)
+    redirdest.append(finaldest.c_str()+8);
+  else
+    redirdest.append(finaldest.c_str()+7);
+  
   prot->SendSimpleResp(302, NULL, (char *) redirdest.c_str(), 0, 0);
 
   reset();
@@ -636,7 +674,11 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
 
   if ((l < 2) && !hash) return;
 
-  s = s + "?";
+  if (s.find('?') == STR_NPOS)
+    s = s + "?";
+  else
+    s = s + '&';
+  
   if (p && (l > 1)) s = s + (p + 1);
 
 
@@ -694,15 +736,11 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
 void XrdHttpReq::parseResource(char *res) {
   // Look for the first '?'
   char *p = strchr(res, '?');
+  char *buf;
   
   // Not found, then it's just a filename
   if (!p) {
     resource.assign(res, 0);
-    char *buf = unquote((char *)resource.c_str());
-    resource.assign(buf, 0);
-    resourceplusopaque.assign(buf, 0);
-    free(buf);
-    
     // Sanitize the resource string, removing double slashes
     int pos = 0;
     do { 
@@ -710,6 +748,13 @@ void XrdHttpReq::parseResource(char *res) {
       if (pos != STR_NPOS)
         resource.erase(pos, 1);
     } while (pos != STR_NPOS);
+    
+    
+    buf = unquote((char *)resource.c_str());
+    resource.assign(buf, 0);
+    resourceplusopaque.assign(buf, 0);
+    free(buf);
+    //resourceplusopaque = resource;
     
     return;
   }
@@ -719,7 +764,7 @@ void XrdHttpReq::parseResource(char *res) {
   int cnt = p - res; // Number of chars to copy
   resource.assign(res, 0, cnt - 1);
 
-  char *buf = unquote((char *)resource.c_str());
+  buf = unquote((char *)resource.c_str());
   resource.assign(buf, 0);
   free(buf);
       
@@ -745,11 +790,44 @@ void XrdHttpReq::parseResource(char *res) {
   
 }
 
+
 int XrdHttpReq::ProcessHTTPReq() {
 
   kXR_int32 l;
 
+  // Implementation of the CERNBOX name xlation kludge
+  std::map<std::string, std::string>::iterator clientmapping = allheaders.find("CBOX-CLIENT-MAPPING");
+  std::map<std::string, std::string>::iterator servermapping = allheaders.find("CBOX-SERVER-MAPPING");
   
+  if (!mappingdone && (clientmapping != allheaders.end()) ) {
+    mappingdone = true;
+    
+    std::string clientmappingstr, servermappingstr;
+    clientmappingstr = clientmapping->second;
+    if (servermapping != allheaders.end()) servermappingstr = servermapping->second;
+    
+    TRACEI(REQ, "clientmapping: '" << clientmappingstr << "' " <<
+    "servermapping: '" << servermappingstr << "'");
+  
+    // Store the previous prefix, unmapped
+    if (!origresource.length()) origresource = resource;
+    
+    // Shield against wrong requests that nginx may throw
+    if (resource.find(clientmappingstr.c_str()) == STR_NPOS) {
+      prot->SendSimpleResp(400, (char *) "Broken name xlation request", NULL, NULL, 0);
+      reset();
+      return -1;
+    }
+    
+    // A-haaa then we do the string substitution in the uris
+    // Example:
+    // 170724 15:16:05 25795 sysXrdHttp:  rc:61 got hdr line: CBOX-CLIENT-MAPPING: cernbox/desktop/remote.php/webdav/home
+    // 170724 15:16:05 25795 sysXrdHttp:  rc:44 got hdr line: CBOX-SERVER-MAPPING: eos/demo/user/u/user0
+    resource.replace(clientmappingstr.c_str(), servermappingstr.c_str());
+    resourceplusopaque.replace(clientmappingstr.c_str(), servermappingstr.c_str());
+    
+    TRACEI(REQ, "resource '" << origresource << "' has been mapped to: '" << resource << "' " );
+  }
   
   // Verify if we have an external handler for this request
   if (prot->exthandler && prot->exthandler->MatchesPath(this->resource.c_str())) {
@@ -785,6 +863,7 @@ int XrdHttpReq::ProcessHTTPReq() {
         prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
         return -1;
       }
+
 
       return 1;
     }
@@ -842,6 +921,7 @@ int XrdHttpReq::ProcessHTTPReq() {
                   if (mydata) {
                       prot->SendSimpleResp(200, NULL, NULL, (char *) mydata->data, mydata->len);
                       reset();
+
                       return 1;
                     }
                 }
@@ -897,12 +977,14 @@ int XrdHttpReq::ProcessHTTPReq() {
             l = res.length() + 1;
             xrdreq.dirlist.dlen = htonl(l);
 
+            
+            
             if (!prot->Bridge->Run((char *) &xrdreq, (char *) res.c_str(), l)) {
               prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
               return -1;
             }
 
-            // We don't want to be invoked again after this request is finished
+            // We want to be invoked again after this request is finished
             return 1;
 
           } else {
@@ -950,6 +1032,7 @@ int XrdHttpReq::ProcessHTTPReq() {
             }
 
             // We have finished
+
             return 1;
 
           }
@@ -995,6 +1078,7 @@ int XrdHttpReq::ProcessHTTPReq() {
               else {
                 TRACE(ALL, " No more bytes to send.");
                 reset();
+
                 return 1;
               }
             }
@@ -1037,18 +1121,103 @@ int XrdHttpReq::ProcessHTTPReq() {
       //prot->SendSimpleResp(501, NULL, NULL, (char *) "HTTPS not supported yet for direct writing. Sorry.", 0);
       //return -1;
       //}
-
+            
       if (!fopened) {
+        XrdOucString finalres(resourceplusopaque);
+        
+        // For EOS+Cernbox we have to pass additional directives coming from the request headers
+        std::map<std::string, std::string>::iterator mtime = allheaders.find("X-OC-Mtime");
+        if (mtime != allheaders.end()) {
+          
+          if (!opaque)
+            finalres.append('?');
+        
+          finalres.append("&mgm.mtime=");
+          finalres.append(mtime->second.c_str());
+          
+        }
+        
 
         // --------- OPEN for write!
         memset(&xrdreq, 0, sizeof (ClientRequest));
+        xrdreq.open.options = htons(kXR_mkpath | kXR_open_updt | kXR_delete | kXR_retstat);
+        
+        // In the case of Cernbox chunked uploadw the filename has a meaning
+        if (allheaders.find("OC-Chunked") != allheaders.end()) {
+          // Parse the filename into the number of chunks etc.
+          XrdOucString mypath = (resource.c_str());
+          int pos;
+          if ((pos = mypath.rfind("-")) != STR_NPOS) {
+            OCnChunk = atoi(mypath.c_str() + pos + 1);
+            mypath.erase(pos);
+          }
+          if (OCnChunk > 65535)
+            prot->SendSimpleResp(400, (char *)"Invalid chunking info", NULL, NULL, 0);
+          
+          if ((pos = mypath.rfind("-")) != STR_NPOS) {
+            mypath.erase(pos);
+            OCtotChunks = atoi(mypath.c_str() + pos + 1);
+          }
+          if (OCtotChunks > 65535)
+            prot->SendSimpleResp(400, (char *)"Invalid chunking info", NULL, NULL, 0);
+          
+          // Get the final file length from the custom Owncloud header
+          std::map<std::string, std::string>::iterator totlen = allheaders.find("OC-Total-Length");
+          if (totlen != allheaders.end())
+            OCtotallength = atoll(totlen->second.c_str());
+          
+          TRACEI(REQ, "This is an Owncloud chunked upload. n: " << OCnChunk << " tot: " << OCtotChunks << " totlen: " << OCtotallength);
+          
+          // This is an owncloud chunked upload, hence we have to modify the filename
+          int pp1 = finalres.find("-chunking-");
+          if (pp1 != STR_NPOS) {
+            int pp2 = finalres.find('?', pp1+10);
+            int ppl = 0;
+            if (pp2 != STR_NPOS) ppl = pp2-pp1;
+            finalres.erase(pp1, ppl);
+          }
+          
+          TRACEI(REQ, "This is an Owncloud chunked upload. finalres: '" << finalres << "'");
+          if (OCnChunk)
+            xrdreq.open.options = htons(kXR_mkpath | kXR_open_updt | kXR_retstat);
+            
+        }
+
+        // If this is the last chunk of a chunked upload, or a normal upload then also we want
+        // FST to control the checksum
+        if ((OCnChunk + 1) >= OCtotChunks) {
+          std::map<std::string, std::string>::iterator occhksum = allheaders.find("OC-Checksum");
+          if (occhksum != allheaders.end()) {
+            
+            if (!opaque)
+              finalres.append('?');
+            
+            finalres.append("&mgm.checksum=");
+            char *p = (char *)strchr(occhksum->second.c_str(), ':');
+            if (p) p++;
+            else p = (char *)occhksum->second.c_str();
+            
+            // We assume that if it's not empty it's adler,and we pad it with zeroes
+            // to have it understood by eos
+            XrdOucString sp(p);
+            while (sp.length() < 8)
+              sp.insert('0', 0);
+            
+            finalres.append(sp);
+            TRACEI(REQ, "Asking for contextual checksum verification. finalres: '" << finalres << "'");
+          }
+        }
+        
+        // --------- OPEN for write!
+        //memset(&xrdreq, 0, sizeof (ClientRequest));
         xrdreq.open.requestid = htons(kXR_open);
-        l = resourceplusopaque.length() + 1;
+        l = finalres.length() + 1;
         xrdreq.open.dlen = htonl(l);
         xrdreq.open.mode = htons(kXR_ur | kXR_uw | kXR_gw | kXR_gr | kXR_or);
-        xrdreq.open.options = htons(kXR_mkpath | kXR_open_updt | kXR_new);
+        // Hack for EOS cernbox
+        //xrdreq.open.options = htons(kXR_mkpath | kXR_open_updt | kXR_new | kXR_retstat);
 
-        if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
+        if (!prot->Bridge->Run((char *) &xrdreq, (char *) finalres.c_str(), l)) {
           prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
           return -1;
         }
@@ -1066,17 +1235,36 @@ int XrdHttpReq::ProcessHTTPReq() {
         // Check if we have finished
         if (writtenbytes < length) {
 
+          // recompute offset where to write
+          if ((OCnChunk + 1) < OCtotChunks) {
+            // the first n-1 chunks have a straight forward offset
+            OCuploadoffset = length * OCnChunk;
 
+          } else {
+            // -------------------------------------------------------
+            // WARNING:
+            // there is buggy ANDROID client not providing this header
+            // in this case we have to assume 1MB chunks
+            // -------------------------------------------------------
+            // the last chunks has to be written at offset=total-length - chunk-length
+            if (OCtotallength > 0) {
+              OCuploadoffset = OCtotallength - length;
+              } else {
+                OCuploadoffset = (OCnChunk * (1LL * 1024LL * 1000LL)); // ANDROID client
+              }
+
+          }
+          
           // --------- WRITE
           memset(&xrdreq, 0, sizeof (xrdreq));
           xrdreq.write.requestid = htons(kXR_write);
           memcpy(xrdreq.write.fhandle, fhandle, 4);
 
 
-          xrdreq.write.offset = htonll(writtenbytes);
+          xrdreq.write.offset = htonll(writtenbytes+OCuploadoffset);
           xrdreq.write.dlen = htonl(prot->BuffUsed());
 
-          TRACEI(REQ, "Writing " << prot->BuffUsed());
+          TRACEI(REQ, "Writing " << prot->BuffUsed() << "@" << writtenbytes+OCuploadoffset);
           if (!prot->Bridge->Run((char *) &xrdreq, prot->myBuffStart, prot->BuffUsed())) {
             prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run write request.", 0);
             return -1;
@@ -1094,21 +1282,64 @@ int XrdHttpReq::ProcessHTTPReq() {
 
         } else {
 
-          // --------- CLOSE
-          memset(&xrdreq, 0, sizeof (ClientRequest));
-          xrdreq.close.requestid = htons(kXR_close);
-          memcpy(xrdreq.close.fhandle, fhandle, 4);
+          // If this is the last chunk, verify the checksum
+          if ( ((OCnChunk + 1) >= OCtotChunks) && !gotphyschksum) {
+            const char *buf = "verifychksum";
+            
+            
+            // This is an owncloud chunked upload, hence we have to modify the filename.
+            // Here it's just for logging as we are querying the filehandle
+            XrdOucString finalres(resourceplusopaque);
+            int pp1 = finalres.find("-chunking-");
+            if (pp1 != STR_NPOS) {
+              int pp2 = finalres.find('?', pp1+10);
+              int ppl = 0;
+              if (pp2 != STR_NPOS) ppl = pp2-pp1;
+              finalres.erase(pp1, ppl);
+            }
+            
+            
+            // Inject a sort of custom query to get the checksum locally
+            memset(&xrdreq, 0, sizeof (ClientRequest));
+            xrdreq.query.requestid = htons(kXR_query);
+            xrdreq.query.infotype = htons(kXR_Qopaqug);
+            l = strlen(buf) + 1;
+            xrdreq.query.dlen = htonl(l);
+            memcpy(xrdreq.query.fhandle, fhandle, 4);
+            TRACEI(REQ, "Sending query request for: '" << finalres << "'");
+            
+             if (!prot->Bridge->Run((char *) &xrdreq, (char*)buf, l)) {
+               prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run query request.", 0);
+               return -1;
+             }
+            
+            gotphyschksum = true;
+            return 0;
+          }
+          else {
+            
+            TRACEI(REQ, "Sending close request for: '" << resource << "'");
+            
+            // --------- CLOSE
+            memset(&xrdreq, 0, sizeof (ClientRequest));
+            xrdreq.close.requestid = htons(kXR_close);
+            
+            memcpy(xrdreq.close.fhandle, fhandle, 4);
+            
+            if (!prot->Bridge->Run((char *) &xrdreq, 0, 0)) {
+              prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run close request.", 0);
+              return -1;
+            }
+            
+            
+            // We have finished
 
-
-          if (!prot->Bridge->Run((char *) &xrdreq, 0, 0)) {
-            prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run close request.", 0);
-            return -1;
+            return 1;
           }
 
-          // We have finished
-          return 1;
+          
 
-        }
+        } //close part
 
       }
 
@@ -1119,6 +1350,7 @@ int XrdHttpReq::ProcessHTTPReq() {
     {
       prot->SendSimpleResp(200, NULL, (char *) "DAV: 1\r\nDAV: <http://apache.org/dav/propset/fs/1>\r\nAllow: HEAD,GET,PUT,PROPFIND,DELETE,OPTIONS", NULL, 0);
       reset();
+
       return 1;
     }
     case XrdHttpReq::rtDELETE:
@@ -1156,7 +1388,13 @@ int XrdHttpReq::ProcessHTTPReq() {
             xrdreq.rmdir.requestid = htons(kXR_rmdir);
 
             string s = resourceplusopaque.c_str();
-
+            
+            // Kludge to enable the recursive deletion in eos/cernbox
+            if (s.find('?') == string::npos)
+              s.append("?mgm.option=r");
+            else
+              s.append("&mgm.option=r");
+            
             l = s.length() + 1;
             xrdreq.rmdir.dlen = htonl(l);
 
@@ -1182,6 +1420,7 @@ int XrdHttpReq::ProcessHTTPReq() {
 
 
           // We don't want to be invoked again after this request is finished
+
           return 1;
 
       }
@@ -1226,22 +1465,16 @@ int XrdHttpReq::ProcessHTTPReq() {
 
 
           // --------- STAT is always the first step
-          memset(&xrdreq, 0, sizeof (ClientRequest));
-          xrdreq.stat.requestid = htons(kXR_stat);
-          string s = resourceplusopaque.c_str();
-
-
-          l = resourceplusopaque.length() + 1;
-          xrdreq.stat.dlen = htonl(l);
-
-          if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
-            prot->SendSimpleResp(501, NULL, NULL, (char *) "Could not run request.", 0);
+          // Do a Stat
+          if (prot->doStat((char *) resourceplusopaque.c_str())) {
+            prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0);
             return -1;
           }
 
 
           if (depth == 0) {
             // We don't need to be invoked again
+
             return 1;
           } else
             // We need to be invoked again to complete the request
@@ -1257,14 +1490,22 @@ int XrdHttpReq::ProcessHTTPReq() {
 
           // --------- DIRLIST
           memset(&xrdreq, 0, sizeof (ClientRequest));
-          xrdreq.dirlist.requestid = htons(kXR_dirlist);
-
-          string s = resourceplusopaque.c_str();
-          xrdreq.dirlist.options[0] = kXR_dstat;
-          //s += "?xrd.dirstat=1";
-
+//           xrdreq.dirlist.requestid = htons(kXR_dirlist);
+// 
+//           string s = resourceplusopaque.c_str();
+//           xrdreq.dirlist.options[0] = kXR_dstat;
+//           //s += "?xrd.dirstat=1";
+// 
+//           l = s.length() + 1;
+//           xrdreq.dirlist.dlen = htonl(l);
+          
+          
+          xrdreq.query.requestid = htons(kXR_query);
+          xrdreq.query.infotype = htons(kXR_Qopaquf);
+          XrdOucString s = resource;           
+          s.append("?mgm.pcmd=getetaglist");
           l = s.length() + 1;
-          xrdreq.dirlist.dlen = htonl(l);
+          xrdreq.query.dlen = htonl(l);
 
           if (!prot->Bridge->Run((char *) &xrdreq, (char *) s.c_str(), l)) {
             prot->SendSimpleResp(501, NULL, NULL, (char *) "Could not run request.", 0);
@@ -1272,6 +1513,7 @@ int XrdHttpReq::ProcessHTTPReq() {
           }
 
           // We don't want to be invoked again after this request is finished
+
           return 1;
         }
       }
@@ -1298,6 +1540,7 @@ int XrdHttpReq::ProcessHTTPReq() {
       }
 
       // We don't want to be invoked again after this request is finished
+
       return 1;
     }
     case XrdHttpReq::rtMOVE:
@@ -1347,6 +1590,7 @@ int XrdHttpReq::ProcessHTTPReq() {
       }
 
       // We don't want to be invoked again after this request is finished
+
       return 1;
 
     }
@@ -1390,20 +1634,34 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           // Now parse the stat info
           TRACEI(REQ, "Stat for HEAD " << resource << " stat=" << (char *) iovP[0].iov_base);
 
-          long dummyl;
-          sscanf((const char *) iovP[0].iov_base, "%ld %lld %ld %ld",
-                  &dummyl,
+          char etag[512];
+          etag[0] = '\0';
+          sscanf((const char *) iovP[0].iov_base, "%ld %lld %ld %ld %s",
+                  &fileid,
                   &filesize,
                   &fileflags,
-                  &filemodtime);
+                  &filemodtime,
+                  etag
+                );
 
-          prot->SendSimpleResp(200, NULL, NULL, NULL, filesize);
+          std::string s;
+          if (strlen(etag) > 2) {
+            s += "ETag: ";
+            s += etag;
+          }
+          
+          prot->SendSimpleResp(200, NULL, (char*)s.c_str(), NULL, filesize);
+          
+          if (!keepalive) {
+            TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
+            return -1;
+          }
           return 1;
         }
 
         prot->SendSimpleResp(500, NULL, NULL, NULL, 0);
         reset();
-        return 1;
+        return -1;
       } else {
         prot->SendSimpleResp(404, NULL, NULL, (char *) "Error man!", 0);
         return -1;
@@ -1513,10 +1771,38 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                       "<td class=\"name\">"
                       "<a href=\"";
 
-              if (resource != "/") {
+              
+              
+              // FIXME: very naive implementation of the CERNBOX name xlation kludge
+              std::map<std::string, std::string>::iterator clientmapping = allheaders.find("CBOX-CLIENT-MAPPING");
+              
+              if (clientmapping != allheaders.end()) {
+                XrdOucString rsrc(resource);
+                
+                std::map<std::string, std::string>::iterator servermapping = allheaders.find("CBOX-SERVER-MAPPING");
+                
+                TRACEI(REQ, "clientmapping: '" << clientmapping->second << "' " <<
+                "servermapping: '" << servermapping->second << "'");
+                
+                // A-haaa then we do the string substitution in the uris
+                // Example:
+                // 170724 15:16:05 25795 sysXrdHttp:  rc:61 got hdr line: CBOX-CLIENT-MAPPING: cernbox/desktop/remote.php/webdav/home
+                // 170724 15:16:05 25795 sysXrdHttp:  rc:44 got hdr line: CBOX-SERVER-MAPPING: eos/demo/user/u/user0
+                rsrc.replace(servermapping->second.c_str(), clientmapping->second.c_str());
+                
+                
+                TRACEI(REQ, "item has been back-mapped to: '" << rsrc << "' " );
+                if (rsrc != "/") {
+                  p += rsrc.c_str();
+                  p += "/";
+                }
+              }
+              else
+                if (resource != "/") {
                   p += resource.c_str();
                   p += "/";
-              }
+                }
+                
               p += e.path + "\">";
 
               p += e.path;
@@ -1621,9 +1907,9 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                 // Now parse the stat info
                 TRACEI(REQ, "Stat for GET " << resource << " stat=" << (char *) iovP[0].iov_base);
                 
-                long dummyl;
+
                 sscanf((const char *) iovP[0].iov_base, "%ld %lld %ld %ld",
-                       &dummyl,
+                       &fileid,
                        &filesize,
                        &fileflags,
                        &filemodtime);
@@ -1660,9 +1946,9 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                 if (iovP[1].iov_len > 1) {
                   TRACEI(REQ, "Stat for GET " << resource << " stat=" << (char *) iovP[1].iov_base);
               
-                  long dummyl;
+
                   sscanf((const char *) iovP[1].iov_base, "%ld %lld %ld %ld",
-                        &dummyl,
+                        &fileid,
                         &filesize,
                         &fileflags,
                         &filemodtime);
@@ -1674,7 +1960,35 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
               if (rwOps.size() == 0) {
                 // Full file.
                 
-                prot->SendSimpleResp(200, NULL, NULL, NULL, filesize);
+                
+                const char* etag = 0;
+                XrdOucString s;
+                // This happens when the client has been redirected here by an mgm
+                if ( (etag = opaque->Get("mgm.etag")) ) {
+                  
+                  
+                  s.append("ETag: ");
+                  s.append(etag);
+                  
+                  // Yes, the second part of the etag is the checksum
+                  char *pos = strchr((char *)etag, ':');
+
+                  if (pos) {
+                    // Remove the trailing quote
+                    int lp = strlen(pos)-1;
+                    if (pos[lp] == '"') pos[lp] = '\0';
+                    
+                    s.append("\r\n");
+                    s.append("OC-Checksum: Adler32:");
+                    // Remove any 0-padding, Owncloud does not like it
+                    pos++;
+                    while (*pos && ((*pos =='0') || (*pos == '"')))
+                      pos++;
+                    s.append(pos);
+                  }
+                   
+                }
+                prot->SendSimpleResp(200, NULL, (char *)s.c_str(), NULL, filesize);
                 return 0;
               } else
                 if (rwOps.size() == 1) {
@@ -1685,7 +1999,29 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                 XrdOucString s = "Content-Range: bytes ";
                 sprintf(buf, "%lld-%lld/%d", rwOps[0].bytestart, rwOps[0].byteend, cnt);
                 s += buf;
-                
+             
+                const char* etag = 0;
+                // This happens when the client has been redirected here by an mgm
+                if ( (etag = opaque->Get("mgm.etag")) ) {
+                  if (s.length())
+                   s.append("\r\n");
+                  s.append("ETag: ");
+                  s.append(etag);
+                  
+                  // Yes, the second part of the etag is the checksum
+                  char *pos = strchr((char *)etag, ':');
+                  int lp = strlen(pos)-1;
+                  if (pos[lp] == '"') pos[lp] = '\0';
+                  if (pos) {
+                    s.append("\r\n");
+                    s.append("OC-Checksum: Adler32:");
+                    // Remove any 0-padding, Owncloud does not like it
+                    pos++;
+                    while (*pos && ((*pos =='0') || (*pos == '"')))
+                      pos++;
+                    s.append(pos);
+                  }
+                }
                 
                 prot->SendSimpleResp(206, NULL, (char *)s.c_str(), NULL, cnt);
                 return 0;
@@ -1790,8 +2126,10 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
             } else
               for (int i = 0; i < iovN; i++) {
-		if (prot->SendData((char *) iovP[i].iov_base, iovP[i].iov_len)) return -1;
-		writtenbytes += iovP[i].iov_len;
+
+                if (prot->SendData((char *) iovP[i].iov_base, iovP[i].iov_len)) return -1;
+                
+                writtenbytes += iovP[i].iov_len;
               }
               
             return 0;
@@ -1820,6 +2158,56 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
         getfhandle();
         fopened = true;
 
+        
+        // Now parse the stat info if we still don't have it
+        if (fileid == 0) {
+          if (iovP[1].iov_len > 1) {
+            TRACEI(REQ, "Stat for PUT " << resource << " stat=" << (char *) iovP[1].iov_base);
+            
+            long long dummyll;
+            sscanf((const char *) iovP[1].iov_base, "%lu %lld %ld %ld",
+                   &fileid,
+                   &dummyll,
+                   &fileflags,
+                   &filemodtime);
+
+            
+          }
+          else
+            TRACEI(ALL, "open() returned no STAT information. Internal error?");
+        }
+        
+        // Implementation of If-Match
+        std::map<std::string, std::string>::iterator ifmatch = allheaders.find("If-Match");
+        if (ifmatch != allheaders.end()) {
+          char *etag = opaque->Get("mgm.etag");
+          
+          if (!etag) {
+            TRACEI(REQ, "Received If-Match: '" << ifmatch->second << "' etag is NULL");
+            prot->SendSimpleResp(412, (char *)"Precondition failed.", NULL, NULL, 0);
+            return -1;
+          }
+          TRACEI(REQ, "Received If-Match: '" << ifmatch->second << "' etag: '" << etag << "'");
+          
+          if (strcmp(ifmatch->second.c_str(), etag)) {
+            prot->SendSimpleResp(412, (char *)"Precondition failed", NULL, NULL, 0);
+            return -1;
+          }
+          
+          // Implementation of If-Non-Match
+          ifmatch = allheaders.find("If-Non-Match");
+          if (ifmatch != allheaders.end()) {
+            char *etag = opaque->Get("mgm.etag");
+            TRACEI(REQ, "Received If-Non-Match: '" << ifmatch->second << "' etag: '" << etag << "'");            
+            if (etag && !strcmp(ifmatch->second.c_str(), etag)) {
+              prot->SendSimpleResp(412, (char *)"Precondition failed", NULL, NULL, 0);
+              return -1;
+            }
+          }
+            
+        }
+        
+        
         // We try to completely fill up our buffer before flushing
         prot->ResumeBytes = min(length - writtenbytes, (long long) prot->BuffAvailable());
 
@@ -1828,14 +2216,20 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           return 0;
         }
 
-        break;
+        
       } else {
 
 
-        // If we are here it's too late to send a proper error message...
-        if (xrdresp == kXR_error) return -1;
+        
 
         if (ntohs(xrdreq.header.requestid) == kXR_write) {
+          
+          // If we are here it's too late to send a proper error message...
+          if (xrdresp == kXR_error) {
+            TRACEI(ALL, "Fatal error during write: xrdresp=" << xrdresp);
+            return -1;
+          }
+          
           int l = ntohl(xrdreq.write.dlen);
 
           // Consume the written bytes
@@ -1847,28 +2241,199 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
           return 0;
         }
-
-        if (ntohs(xrdreq.header.requestid) == kXR_close) {
-          if (xrdresp == kXR_ok) {
-            prot->SendSimpleResp(200, NULL, NULL, (char *) ":-)", 0);
+        
+        if (ntohs(xrdreq.header.requestid) == kXR_query) {
+          
+          if ((xrdresp == kXR_ok) && (iovN > 0)) {
+            
+            // Now parse the checksum
+            char buf[1024];
+            buf[0] = '\0';
+            strncpy(buf, (const char *)iovP[0].iov_base, sizeof(buf));
+            buf[sizeof(buf)-1] = '\0';
+            if (iovP[0].iov_len < sizeof(buf))
+              buf[iovP[0].iov_len] = '\0';
+            
+            TRACEI(REQ, "Got a query response: " << resource << " resp='" << (char *) buf << "'");
+            filechksum = buf;
+            
+          }
+          else {
+            TRACEI(ALL, "The verify checksum request failed");
+            prot->SendSimpleResp(412, (char*)"Precondition failed", NULL, NULL, 0);
+            return -1;
+            
+            filechksum = "";
             return 1;
-          } else {
-            prot->SendSimpleResp(500, NULL, NULL, (char *) etext.c_str(), 0);
+          }
+
+          return 0;
+        } // kXR_query
+        
+      
+      if (ntohs(xrdreq.header.requestid) == kXR_close) {
+        XrdOucString addhdr;
+        
+        if (xrdresp == kXR_ok) {
+          const char* etag = 0;
+          
+          
+          
+          // This is a last step of a successful PUT, recompute our ETag if
+          // this is not an Owncloud chunked upload or if it's the last chunk
+          if ((OCtotChunks == 0) || (OCnChunk == OCtotChunks-1)) {
+            char setag[256];
+            std::map<std::string, std::string>::iterator mtime = allheaders.find("X-OC-Mtime");
+            
+            // If there is a checksum we use the checksum, otherwise we return inode+mtime
+            if (filechksum.length() > 4) {
+              
+              
+              if (!strncmp(filechksum.c_str(), "md5:", 4)) {
+                // use checksum, S3 wants the pure MD5
+                snprintf(setag, sizeof(setag) - 1, "\"%s\"", filechksum.c_str());
+                
+                if (addhdr.length()) addhdr.append("\r\n");
+                addhdr.append("ETag: ");
+                addhdr.append(setag);
+                
+                
+                addhdr.append("\r\n");
+                addhdr.append("OC-Checksum: ");
+
+                // Remove any 0-padding, Owncloud does not like it
+                char buf[256];
+                strcpy(buf, filechksum.c_str());
+                char *pos = buf;
+                while ((*pos =='0') || (*pos == '"'))
+                  pos++;
+                addhdr.append(pos);
+
+                
+              } else
+                if (!strncmp(filechksum.c_str(), "adler:", 6)) {
+                  // use inode + checksum
+                  if (eosfileid.length() > 0) 
+                    snprintf(setag, sizeof(setag) - 1, "\"%s:%s\"",
+                             eosfileid.c_str(),
+                             filechksum.c_str()+6);
+                    else
+                      snprintf(setag, sizeof(setag) - 1, "\"%llu:%s\"",
+                               FidToInode((unsigned long long) fileid),
+                               filechksum.c_str()+6);
+                      
+                      if (addhdr.length()) addhdr.append("\r\n");
+                      addhdr.append("ETag: ");
+                    addhdr.append(setag);
+                    
+                    addhdr.append("\r\n");
+                    addhdr.append("OC-Checksum: Adler32:");
+                    // Remove any 0-padding, Owncloud does not like it
+                    char buf[256];
+                    strcpy(buf, filechksum.c_str()+6);
+                    char *pos = buf;
+                    while ((*pos =='0') || (*pos == '"'))
+                      pos++;
+                    addhdr.append(pos);
+                    
+                } 
+                
+            } else {
+              // No checksum, use inode + mtime
+              
+              
+              if (mtime != allheaders.end()) {
+                if (eosfileid.length() > 0) 
+                  snprintf(setag, sizeof(setag) - 1, "\"%s:%s\"",
+                           eosfileid.c_str(), mtime->second.c_str());
+                  else
+                    snprintf(setag, sizeof(setag) - 1, "\"%lu:%s\"",
+                             fileid, mtime->second.c_str());
+              }
+              else {
+                if (eosfileid.length() > 0) 
+                  snprintf(setag, sizeof(setag) - 1, "\"%s:%lu\"",
+                           eosfileid.c_str(), time(0));
+                  else
+                    snprintf(setag, sizeof(setag) - 1, "\"%lu:%lu\"",
+                             fileid, time(0));
+              }
+              
+              if (addhdr.length()) addhdr.append("\r\n");
+              addhdr.append("ETag: ");
+              addhdr.append(setag); 
+            }
+            
+            // If the client had set an mtime, let's give a confirmation
+            // https://github.com/cernbox/smashbox/blob/master/protocol/checksum.md
+            if (mtime != allheaders.end()) {
+              if (addhdr.length()) addhdr.append("\r\n");
+              addhdr.append("X-OC-MTime: accepted");
+            }
+            
+            
+            
+            
+            
+          }
+          
+          
+          // This happens when the client has been redirected here by an mgm
+          if ( (etag = opaque->Get("mgm.etag")) ) {
+            if (etag[0] == '"') eosfileid = etag+1;
+            if (eosfileid.endswith('"')) eosfileid.erasefromend(1);
+            int p = eosfileid.find(':');
+            if (p > 0)
+              eosfileid.erase(p);
+          }
+          
+          if (eosfileid.length() > 0) {
+            if (addhdr.length()) addhdr.append("\r\n");
+            addhdr.append("OC-FileId: ");
+            addhdr.append(eosfileid);
+          }
+          else if (fileid) {
+            // If we have a fileid just let's add it to the response header
+            if (addhdr.length()) addhdr.append("\r\n");
+            addhdr.append("OC-FileId: ");
+            char buf[256];
+            sprintf(buf, "%llu", FidToInode((unsigned long long) fileid));
+            addhdr.append(buf);
+          }
+          
+          
+          
+          
+          if (addhdr.length() > 0)
+            prot->SendSimpleResp(201, NULL,  (char *)addhdr.c_str(), 0, 0);  
+          else
+            prot->SendSimpleResp(201, NULL, NULL, 0, 0);
+          
+          
+          // Finished
+          if (!keepalive) {
+            TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
             return -1;
           }
+          return 1;
+        } else {
+          // We assume that close() can fail only due to the checksum check
+          prot->SendSimpleResp(412, (char *)"Precondition failed", NULL, (char *) etext.c_str(), 0);
+          return -1;
         }
-
-
       }
-
-
-
-
-
+      
+      
+      
+      
+      }
+      
+      
+      
       break;
-    }
-
-
+    } //case
+    
+    
 
     case XrdHttpReq::rtDELETE:
     {
@@ -1903,7 +2468,11 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
         default: // response to rm
         {
           if (xrdresp == kXR_ok) {
-            prot->SendSimpleResp(200, NULL, NULL, (char *) ":-)", 0);
+            prot->SendSimpleResp(204, NULL, NULL, 0, 0);
+            if (!keepalive) {
+              TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
+              return -1;
+            }
             return 1;
           }
           prot->SendSimpleResp(500, NULL, NULL, (char *) "Internal Error", 0);
@@ -1930,54 +2499,65 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           // Now parse the answer building the entries vector
           if (iovN > 0) {
             DirListInfo e;
-            e.path = resource.c_str();
+            e.path = origresource.c_str();
+            if (!e.path.length()) e.path = resource.c_str();
 
             // Now parse the stat info
             TRACEI(REQ, "Collection " << resource << " entry=" << resource << " stat=" << (char *) iovP[0].iov_base);
 
-            long dummyl;
-            sscanf((const char *) iovP[0].iov_base, "%ld %lld %ld %ld",
-                    &dummyl,
-                    &e.size,
-                    &e.flags,
-                    &e.modtime);
+            char etag[512];
+            etag[0] = '\0';
+            sscanf((const char *) iovP[0].iov_base, "%ld %lld %ld %ld %s",
+                   &fileid,
+                   &filesize,
+                   &fileflags,
+                   &filemodtime,
+                   etag
+            );
+
 
             if (e.path.length() && (e.path != ".") && (e.path != "..")) {
               /* The entry is filled. */
 
 
               string p;
-              stringresp += "<D:response xmlns:lp1=\"DAV:\" xmlns:lp2=\"http://apache.org/dav/props/\" xmlns:lp3=\"LCGDM:\">\n";
+              stringresp += "<D:response xmlns:d=\"DAV:\" xmlns:lp2=\"http://apache.org/dav/props/\" xmlns:lp3=\"LCGDM:\">\n";
               stringresp += "<D:href>" + e.path + "</D:href>\n";
               stringresp += "<D:propstat>\n<D:prop>\n";
 
               // Now add the properties that we have to add
 
               // File size
-              stringresp += "<lp1:getcontentlength>";
+              stringresp += "<d:getcontentlength>";
               stringresp += itos(e.size);
-              stringresp += "</lp1:getcontentlength>\n";
+              stringresp += "</d:getcontentlength>\n";
 
 
 
-              stringresp += "<lp1:getlastmodified>";
+              stringresp += "<d:getlastmodified>";
               stringresp += ISOdatetime(e.modtime);
-              stringresp += "</lp1:getlastmodified>\n";
+              stringresp += "</d:getlastmodified>\n";
 
-
+              if (strlen(etag) > 2) {
+                stringresp += "<d:getetag>";
+                char *cc = quote(etag);
+                stringresp.append(cc);
+                free(cc);
+                stringresp += "</d:getetag>\n";
+              }
 
               if (e.flags & kXR_isDir) {
-                stringresp += "<lp1:resourcetype><D:collection/></lp1:resourcetype>\n";
-                stringresp += "<lp1:iscollection>1</lp1:iscollection>\n";
+                stringresp += "<d:resourcetype><D:collection/></d:resourcetype>\n";
+                stringresp += "<d:iscollection>1</d:iscollection>\n";
               } else {
-                stringresp += "<lp1:iscollection>0</lp1:iscollection>\n";
+                stringresp += "<d:iscollection>0</d:iscollection>\n";
               }
 
               if (e.flags & kXR_xset) {
-                stringresp += "<lp1:executable>T</lp1:executable>\n";
-                stringresp += "<lp1:iscollection>1</lp1:iscollection>\n";
+                stringresp += "<d:executable>T</d:executable>\n";
+                stringresp += "<d:iscollection>1</d:iscollection>\n";
               } else {
-                stringresp += "<lp1:executable>F</lp1:executable>\n";
+                stringresp += "<d:executable>F</d:executable>\n";
               }
 
 
@@ -1995,9 +2575,14 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
             string s = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\" xmlns:ns1=\"http://apache.org/dav/props/\" xmlns:ns0=\"DAV:\">\n";
             stringresp.insert(0, s);
             stringresp += "</D:multistatus>\n";
-            prot->SendSimpleResp(207, (char *) "Multi-Status", (char *) "Content-Type: text/xml; charset=\"utf-8\"",
+            prot->SendSimpleResp(207, (char *) "Multi-Status", (char *) "Content-Type: application/xml; charset=utf-8",
                     (char *) stringresp.c_str(), stringresp.length());
+             
             stringresp.clear();
+            if (!keepalive) {
+              TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
+              return -1;
+            }
             return 1;
           }
 
@@ -2011,6 +2596,7 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           if (iovN > 0) {
             char *startp = (char *) iovP[0].iov_base, *endp = 0;
             char entry[1024];
+            char etag[512];
             DirListInfo e;
 
             while ( (size_t)(startp - (char *) iovP[0].iov_base) < (size_t)(iovP[0].iov_len - 1) ) {
@@ -2026,11 +2612,14 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                 TRACEI(REQ, "Dirlist " << resource << " entry=" << entry << " stat=" << endp);
 
                 long dummyl;
-                sscanf(endp, "%ld %lld %ld %ld",
+                etag[0] = '\0';
+                sscanf(endp, "%ld %lld %ld %ld %s\n",
                         &dummyl,
                         &e.size,
                         &e.flags,
-                        &e.modtime);
+                        &e.modtime,
+                        etag
+                      );
               }
 
 
@@ -2053,11 +2642,22 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                  */
 
 
-                string p = resource.c_str();
-                if (*p.rbegin() != '/') p += "/";
-                p += e.path;
+                XrdOucString p = origresource;
+                if (p.length() == 0)
+                  p = resource;
+                if (!p.endswith('/') && (*e.path.begin() != '/')) p += "/";
+                
+                  
+                p += e.path.c_str();
+                
+
+                TRACEI(REQ, "listed item: '" << p.c_str() << "' " );
+
+                
                 stringresp += "<D:response xmlns:lp1=\"DAV:\" xmlns:lp2=\"http://apache.org/dav/props/\" xmlns:lp3=\"LCGDM:\">\n";
-                stringresp += "<D:href>" + p + "</D:href>\n";
+                stringresp += "<D:href>";
+                stringresp +=  p.c_str();
+                stringresp +=  "</D:href>\n";
                 stringresp += "<D:propstat>\n<D:prop>\n";
 
 
@@ -2073,6 +2673,14 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                 stringresp += ISOdatetime(e.modtime);
                 stringresp += "</lp1:getlastmodified>\n";
 
+                if (strlen(etag) > 2) {
+                  stringresp += "<d:getetag>";
+                  char *cc = quote(etag);
+                  stringresp.append(cc);
+                  free(cc);
+                  stringresp += "</d:getetag>\n";
+                }
+                
                 if (e.flags & kXR_isDir) {
                   stringresp += "<lp1:resourcetype><D:collection/></lp1:resourcetype>\n";
                   stringresp += "<lp1:iscollection>1</lp1:iscollection>\n";
@@ -2110,9 +2718,14 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
             string s = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\" xmlns:ns1=\"http://apache.org/dav/props/\" xmlns:ns0=\"DAV:\">\n";
             stringresp.insert(0, s);
             stringresp += "</D:multistatus>\n";
-            prot->SendSimpleResp(207, (char *) "Multi-Status", (char *) "Content-Type: text/xml; charset=\"utf-8\"",
+            prot->SendSimpleResp(207, (char *) "Multi-Status", (char *) "Content-Type: application/xml; charset=utf-8",
                     (char *) stringresp.c_str(), stringresp.length());
             stringresp.clear();
+            
+            if (!keepalive) {
+              TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
+              return -1;
+            }
             return 1;
           }
 
@@ -2134,6 +2747,10 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
       }
 
       prot->SendSimpleResp(201, NULL, NULL, (char *) ":-)", 0);
+      if (!keepalive) {
+        TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
+        return -1;
+      }
       return 1;
 
     }
@@ -2146,6 +2763,10 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
       }
 
       prot->SendSimpleResp(201, NULL, NULL, (char *) ":-)", 0);
+      if (!keepalive) {
+        TRACEI(REQ, "Keepalive is off, forcing a connection close in PostProcess");
+        return -1;
+      }
       return 1;
 
     }
@@ -2205,10 +2826,13 @@ void XrdHttpReq::reset() {
 
   request = rtUnknown;
   resource = "";
+  origresource = "";
+  resourceplusopaque = "";
+  
   allheaders.clear();
 
   headerok = false;
-  keepalive = true;
+
   length = 0;
   depth = 0;
   sendcontinue = false;
@@ -2233,12 +2857,22 @@ void XrdHttpReq::reset() {
   iovN = 0;
   iovL = 0;
 
-
+  filechksum = "";
+  gotphyschksum = false;
+  
   if (opaque) delete(opaque);
   opaque = 0;
 
   fopened = false;
-
+  mappingdone = false;
+  
+  OCnChunk = 0;
+  OCtotChunks = 0;
+  OCuploadoffset = 0;
+  OCtotallength = 0;
+  
+  checksummismatch = false;
+  
   final = false;
 }
 
