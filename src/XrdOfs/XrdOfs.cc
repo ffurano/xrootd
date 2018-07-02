@@ -1362,15 +1362,16 @@ int XrdOfs::chksum(      csFunc            Func,   // In
 
 // If we are a menager then we need to redirect the client to where the file is
 //
-   if (CksRdr && Finder && Finder->isRemote() 
-   &&  (rc = Finder->Locate(einfo, Path, SFS_O_RDONLY, &cksEnv)))
-      return fsError(einfo, rc);
+   if (CksRdr && Finder && Finder->isRemote()) {
+      if ( (rc = Finder->Locate(einfo, Path, SFS_O_RDONLY, &cksEnv)) )
+         return fsError(einfo, rc);
+      
 
-// At this point we need to convert the lfn to a pfn
-//
-   if (CksPfn && !(Path = XrdOfsOss->Lfn2Pfn(Path, buff, MAXPATHLEN, rc)))
-      return Emsg(epname, einfo, rc, "checksum", Path);
-
+      // At this point we need to convert the lfn to a pfn
+      //
+      if (CksPfn && !(Path = XrdOfsOss->Lfn2Pfn(Path, buff, MAXPATHLEN, rc)))
+        return Emsg(epname, einfo, rc, "checksum", Path);
+   }
 // Now determine what to do
 //
         if (Func == XrdSfsFileSystem::csCalc) rc = Cks->Calc(Path, cksData);
