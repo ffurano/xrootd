@@ -1097,7 +1097,25 @@ int XrdHttpReq::ProcessHTTPReq() {
             // We don't want to be invoked again after this request is finished
             return 1;
 
-          } else {
+          } else if (!m_req_digest.empty()) {
+            // In this case, the Want-Digest header was set.
+            bool has_opaque = strchr(resourceplusopaque.c_str(), '?');
+            // Note that doChksum requires that the memory stays alive until the callback is invoked.
+            m_resource_with_digest = resourceplusopaque;
+            if (has_opaque) {
+              m_resource_with_digest += "&cks.type=";
+              m_resource_with_digest += convert_digest_name(m_req_digest);
+            } else {
+              m_resource_with_digest += "?cks.type=";
+              m_resource_with_digest += convert_digest_name(m_req_digest);
+            }
+            if (prot->doChksum(m_resource_with_digest) < 0) {
+              prot->SendSimpleResp(500, NULL, NULL, (char *) "Failed to start internal checksum request to satisfy Want-Digest header.", 0, false);
+              return -1;
+            }
+            return 0;
+          }
+          else {
 
 
             // --------- OPEN
@@ -1122,10 +1140,34 @@ int XrdHttpReq::ProcessHTTPReq() {
 
 
         }
+        case 2:  // Open() in the case the user also requested a checksum.
+        {
+          if (!m_req_digest.empty()) {
+            // --------- OPEN
+            memset(&xrdreq, 0, sizeof (ClientRequest));
+            xrdreq.open.requestid = htons(kXR_open);
+            l = resourceplusopaque.length() + 1;
+            xrdreq.open.dlen = htonl(l);
+            xrdreq.open.mode = 0;
+            xrdreq.open.options = htons(kXR_retstat | kXR_open_read);
+
+            if (!prot->Bridge->Run((char *) &xrdreq, (char *) resourceplusopaque.c_str(), l)) {
+              prot->SendSimpleResp(404, NULL, NULL, (char *) "Could not run request.", 0, false);
+              return -1;
+            }
+
+            // Prepare to chunk up the request
+            writtenbytes = 0;
+
+            // We want to be invoked again after this request is finished
+            return 0;
+          }
+          // fallthrough
+        }
         default: // Read() or Close()
         {
 
-          if ( ((reqstate == 3) && (rwOps.size() > 1)) ||
+          if ( ((reqstate == 3 || (!m_req_digest.empty() && (reqstate == 4))) && (rwOps.size() > 1)) ||
             (writtenbytes >= length) ) {
 
             // Close() if this was a readv or we have finished, otherwise read the next chunk
@@ -1555,6 +1597,43 @@ int XrdHttpReq::ProcessHTTPReq() {
 }
 
 
+int
+XrdHttpReq::PostProcessChecksum(std::string &digest_header) {
+  if (iovN > 0) {
+    if (xrdresp == kXR_error) {
+      prot->SendSimpleResp(httpStatusCode, NULL, NULL, "Failed to determine checksum", 0, false);
+      return -1;
+    }
+
+    TRACEI(REQ, "Checksum for HEAD " << resource << " " << reinterpret_cast<char *>(iovP[0].iov_base) << "=" << reinterpret_cast<char *>(iovP[iovN-1].iov_base));
+
+    bool convert_to_base64 = needs_base64_padding(m_req_digest);
+    char *digest_value = reinterpret_cast<char *>(iovP[iovN-1].iov_base);
+    if (convert_to_base64) {
+      size_t digest_length = strlen(digest_value);
+      unsigned char *digest_binary_value = (unsigned char *)malloc(digest_length);
+      if (!Fromhexdigest(reinterpret_cast<unsigned char *>(digest_value), digest_length, digest_binary_value)) {
+        prot->SendSimpleResp(500, NULL, NULL, (char *) "Failed to convert checksum hexdigest to base64.", 0, false);
+        free(digest_binary_value);
+        return -1;
+      }
+      char *digest_base64_value = (char *)malloc(digest_length);
+      Tobase64(digest_binary_value, digest_length/2, digest_base64_value);
+      free(digest_binary_value);
+      digest_value = digest_base64_value;
+    }
+
+    digest_header = "Digest: ";
+    digest_header += m_req_digest;
+    digest_header += "=";
+    digest_header += digest_value;
+    return 0;
+  } else {
+    prot->SendSimpleResp(500, NULL, NULL, "Underlying filesystem failed to calculate checksum.", 0, false);
+    return -1;
+  }
+}
+
 
 // This is invoked by the callbacks, after something has happened in the bridge
 
@@ -1606,29 +1685,11 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
         return keepalive ? 1 : -1;
       } else { // We requested a checksum and now have its response.
         if (iovN > 0) {
-          TRACEI(REQ, "Checksum for HEAD " << resource << " " << reinterpret_cast<char *>(iovP[0].iov_base) << "=" << reinterpret_cast<char *>(iovP[iovN-1].iov_base));
-
-          bool convert_to_base64 = needs_base64_padding(m_req_digest);
-          char *digest_value = reinterpret_cast<char *>(iovP[iovN-1].iov_base);
-          if (convert_to_base64) {
-            size_t digest_length = strlen(digest_value);
-            unsigned char *digest_binary_value = (unsigned char *)malloc(digest_length);
-            if (!Fromhexdigest(reinterpret_cast<unsigned char *>(digest_value), digest_length, digest_binary_value)) {
-              prot->SendSimpleResp(500, NULL, NULL, (char *) "Failed to convert checksum hexdigest to base64.", 0, false);
-              free(digest_binary_value);
-              return -1;
-            }
-            char *digest_base64_value = (char *)malloc(digest_length);
-            Tobase64(digest_binary_value, digest_length/2, digest_base64_value);
-            free(digest_binary_value);
-            digest_value = digest_base64_value;
+          std::string digest_response;
+          int response = PostProcessChecksum(digest_response);
+          if (-1 == response) {
+                return -1;
           }
-
-          std::string digest_response = "Digest: ";
-          digest_response += m_req_digest;
-          digest_response += "=";
-          digest_response += digest_value;
-          if (convert_to_base64) {free(digest_value);}
           prot->SendSimpleResp(200, NULL, digest_response.c_str(), NULL, filesize, keepalive);
           return keepalive ? 1 : -1;
         } else {
@@ -1863,11 +1924,9 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                     length = filesize;
                 }
               }
-              else
+              else {
                 TRACEI(REQ, "Can't find the stat information for '" << resource << "' Internal error?");
-              
-              return 0;
-              
+              }
             }
             
             // We are here if the request failed
@@ -1882,11 +1941,19 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
             return 0;
           }
-          case 1: //open 
+          case 1:  // open
+          case 2:  // open when digest was requested
           {
 
-            
-            if (xrdresp == kXR_ok) {
+            if (reqstate == 1 && !m_req_digest.empty()) { // We requested a checksum and now have its response.
+              int response = PostProcessChecksum(m_digest_header);
+              if (-1 == response) {
+                return -1;
+              }
+              return 0;
+            } else if (((reqstate == 2 && !m_req_digest.empty()) ||
+                        (reqstate == 1 && m_req_digest.empty()))
+              && (xrdresp == kXR_ok)) {
 
 
               getfhandle();
@@ -1916,7 +1983,7 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
               if (rwOps.size() == 0) {
                 // Full file.
                 
-                prot->SendSimpleResp(200, NULL, NULL, NULL, filesize, keepalive);
+                prot->SendSimpleResp(200, NULL, m_digest_header.c_str(), NULL, filesize, keepalive);
                 return 0;
               } else
                 if (rwOps.size() == 1) {
@@ -1927,8 +1994,11 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                 XrdOucString s = "Content-Range: bytes ";
                 sprintf(buf, "%lld-%lld/%lld", rwOps[0].bytestart, rwOps[0].byteend, filesize);
                 s += buf;
-                
-                
+                if (!m_digest_header.empty()) {
+                  s += "\n";
+                  s += m_digest_header.c_str();
+                }
+
                 prot->SendSimpleResp(206, NULL, (char *)s.c_str(), NULL, cnt, keepalive);
                 return 0;
               } else
@@ -1949,14 +2019,19 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                           (char *) "123456").size();
                 }
                 cnt += buildPartialHdrEnd((char *) "123456").size();
+                std::string header = "Content-Type: multipart/byteranges; boundary=123456";
+                if (!m_digest_header.empty()) {
+                  header += "\n";
+                  header += m_digest_header;
+                }
 
-                prot->SendSimpleResp(206, NULL, (char *) "Content-Type: multipart/byteranges; boundary=123456", NULL, cnt, keepalive);
+                prot->SendSimpleResp(206, NULL, header.c_str(), NULL, cnt, keepalive);
                 return 0;
               }
 
 
 
-            } else {
+            } else if (xrdresp != kXR_ok) {
               
               // If it's a dir then we are in the wrong place and we did the wrong thing.
               //if (xrderrcode == 3016) {
@@ -1968,10 +2043,9 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
                                    httpStatusText.c_str(), httpStatusText.length(), false);
               return -1;
             }
-            
-            prot->SendSimpleResp(500, NULL, NULL, (char *) "This line should never be reached, you have been able to.", 0, keepalive);
-            return -1;
-            
+
+            // Remaining case: reqstate == 2 and we didn't ask for a digest (should be a read);
+            // fallthrough
           }
           default: //read or readv
           {
